@@ -68,6 +68,7 @@ type Container struct {
 	ID               int           `json:"id"`
 	UUID             string        `json:"uuid"`
 	Name             string        `json:"name"`
+	LXCName          string        `json:"lxc_name,omitempty"`
 	Template         string        `json:"template"`
 	VCPU             float64       `json:"vcpu"`
 	RAMMB            int           `json:"ram_mb"`
@@ -97,6 +98,9 @@ type Container struct {
 
 // LxcName returns the internal LXC container name (ct-{id})
 func (c *Container) LxcName() string {
+	if c.LXCName != "" {
+		return c.LXCName
+	}
 	return fmt.Sprintf("ct-%d", c.ID)
 }
 

@@ -1915,9 +1915,9 @@ func (m *Manager) ListContainers() ([]config.Container, error) {
 	return containers, nil
 }
 
-// ImportExistingClicdContainers imports LXC containers named ct-{id} into the
-// CLICD config. Containers with arbitrary LXC names cannot be imported because
-// CLICD derives the runtime LXC name from the numeric container ID.
+// ImportExistingClicdContainers imports existing LXC containers into the CLICD
+// config. Native CLICD containers keep ct-{id}; arbitrary LXC names are stored
+// in Container.LXCName so Web and CLI can manage the same imported container.
 func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 	entries, err := os.ReadDir(m.LxcPath)
 	if err != nil {
@@ -1926,10 +1926,12 @@ func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 
 	existingIDs := make(map[int]bool)
 	existingNames := make(map[string]bool)
+	existingLXCNames := make(map[string]bool)
 	maxID := config.AppConfig.NextContainerID - 1
 	for _, c := range config.AppConfig.Containers {
 		existingIDs[c.ID] = true
 		existingNames[c.Name] = true
+		existingLXCNames[c.LxcName()] = true
 		if c.ID > maxID {
 			maxID = c.ID
 		}
@@ -1941,22 +1943,30 @@ func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		matches := re.FindStringSubmatch(entry.Name())
-		if len(matches) != 2 {
+		lxcName := entry.Name()
+		if existingLXCNames[lxcName] {
 			continue
 		}
 
-		id, err := strconv.Atoi(matches[1])
-		if err != nil || id <= 0 || existingIDs[id] {
-			continue
+		id := 0
+		if matches := re.FindStringSubmatch(lxcName); len(matches) == 2 {
+			if parsed, err := strconv.Atoi(matches[1]); err == nil && parsed > 0 && !existingIDs[parsed] {
+				id = parsed
+			}
+		}
+		if id == 0 {
+			id = maxID + 1
+			for existingIDs[id] {
+				id++
+			}
 		}
 
-		name := entry.Name()
+		name := lxcName
 		if existingNames[name] {
 			name = fmt.Sprintf("imported-%d", id)
 		}
 
-		status, err := m.GetContainerStatus(entry.Name())
+		status, err := m.GetContainerStatus(lxcName)
 		if err != nil || status == "" {
 			status = "unknown"
 		}
@@ -1965,6 +1975,7 @@ func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 			ID:               id,
 			UUID:             config.NewContainerUUID(),
 			Name:             name,
+			LXCName:          lxcName,
 			Template:         "imported",
 			VCPU:             1,
 			RAMMB:            512,
@@ -1978,7 +1989,7 @@ func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 		}
 
 		if status == "running" {
-			if ip, err := m.GetContainerIP(entry.Name()); err == nil {
+			if ip, err := m.GetContainerIP(lxcName); err == nil {
 				c.IP = ip
 			}
 		}
@@ -1987,6 +1998,7 @@ func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 		imported = append(imported, c)
 		existingIDs[id] = true
 		existingNames[name] = true
+		existingLXCNames[lxcName] = true
 		if id > maxID {
 			maxID = id
 		}

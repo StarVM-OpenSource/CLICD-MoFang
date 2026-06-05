@@ -113,7 +113,7 @@ func printMenu() {
 	fmt.Println("  7. Reinstall container")
 	fmt.Println("  8. Reset web admin password")
 	fmt.Printf("  9. %s web panel\n", webStatus)
-	fmt.Println("  10. Import existing ct-* containers")
+	fmt.Println("  10. Import existing LXC containers")
 	fmt.Println("  11. Uninstall CLICD")
 	fmt.Println("  0. System info")
 	fmt.Println("  q. Quit")
@@ -330,9 +330,9 @@ func isWebPanelRunning() bool {
 }
 
 func cliImportExistingContainers() {
-	fmt.Println("\n--- Import existing CLICD containers ---")
-	fmt.Println("This imports LXC containers named ct-{id} from /var/lib/lxc into CLICD config.")
-	fmt.Println("Containers with names like ubuntu or alpine are skipped because CLICD requires ct-{id}.")
+	fmt.Println("\n--- Import existing LXC containers ---")
+	fmt.Println("This imports containers from /var/lib/lxc into CLICD config.")
+	fmt.Println("Imported containers keep their real LXC name so Web and CLI manage the same container.")
 
 	imported, err := manager.ImportExistingClicdContainers()
 	if err != nil {
