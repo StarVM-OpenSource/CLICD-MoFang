@@ -37,7 +37,13 @@ CLICD 是一个面向 LXC 的轻量容器管理面板，提供 Web 控制台、C
 
 ## 安装
 
-推荐使用 GitHub Actions 构建出的 Release 产物。下载 `clicd-linux-amd64.tar.gz` 后在目标服务器上执行：
+推荐使用最新 Release 一键安装。在目标服务器上执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh | sudo sh
+```
+
+也可以下载 GitHub Actions 构建出的 Release 产物 `clicd-linux-amd64.tar.gz` 后手动安装：
 
 ```bash
 tar -xzf clicd-linux-amd64.tar.gz
@@ -66,64 +72,6 @@ Password: 随机 16 位密码
 journalctl -u clicd --no-pager -n 80 | grep -E "Username:|Password:"
 ```
 
-## GitHub Actions 构建
-
-仓库内置 `.github/workflows/build.yml`：
-
-- 推送到 `main` 或 `master` 时自动构建 Linux amd64 产物。
-- 创建 `v*` 标签时自动发布 GitHub Release。
-- 支持手动 `workflow_dispatch` 构建。
-
-发布版本示例：
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-Release 会包含：
-
-```text
-clicd-linux-amd64.tar.gz
-clicd-linux-amd64
-SHA256SUMS
-```
-
-## CLI 模式
-
-进入 CLI：
-
-```bash
-clicd cli
-```
-
-仅使用 CLI，不自动拉起 Web 服务：
-
-```bash
-systemctl stop clicd
-systemctl disable clicd
-clicd cli --no-web
-```
-
-重新启用 Web 控制台：
-
-```bash
-systemctl enable --now clicd
-```
-
-## 常用服务命令
-
-```bash
-systemctl status clicd
-systemctl restart clicd
-journalctl -u clicd -f
-```
-
-## 注意事项
-
-- 需要 root 权限安装和运行。
-- 宿主机需要支持 LXC。
-- NAT 和端口映射依赖 iptables。
-- 安全告警依赖 conntrack 或 `/proc/net/nf_conntrack`。
-- IPv6 分配要求宿主机拥有可用公网 IPv6 地址段。
-- 配置文件位于 `/root/.clicd/config.json`，其中包含敏感信息，不要提交到公开仓库。
+![alt text](/img/image.png)
+![alt text](/img/image-1.png)
+![alt text](/img/image-2.png)
