@@ -19,11 +19,10 @@ export default function WebSSHViewer({ containerName, onClose }: WebSSHViewerPro
   const [status, setStatus] = useState<'connecting' | 'preparing' | 'connected' | 'disconnected' | 'error'>('connecting')
   const [errorMsg, setErrorMsg] = useState('')
 
-  const buildWebSSHUrl = (ticket: string) => {
+  const buildWebSSHUrl = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const params = new URLSearchParams({
       container: containerName,
-      ticket,
     })
     return `${protocol}//${window.location.host}/api/ssh?${params.toString()}`
   }
@@ -106,7 +105,7 @@ export default function WebSSHViewer({ containerName, onClose }: WebSSHViewerPro
       return
     }
 
-    const ws = new WebSocket(buildWebSSHUrl(ticket))
+    const ws = new WebSocket(buildWebSSHUrl(), [`clicd-ticket.${ticket}`])
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
 

@@ -71,6 +71,73 @@ remove_path() {
     log "Removed $path"
 }
 
+unmount_path_tree() {
+    path="$1"
+    if [ ! -e "$path" ]; then
+        return
+    fi
+
+    if has_cmd findmnt; then
+        findmnt -R -n -o TARGET "$path" 2>/dev/null | sort -r | while IFS= read -r mountpoint; do
+            [ -n "$mountpoint" ] || continue
+            umount -R -l "$mountpoint" >/dev/null 2>&1 || umount -l "$mountpoint" >/dev/null 2>&1 || true
+        done
+    fi
+
+    umount -R -l "$path/rootfs" >/dev/null 2>&1 || umount -l "$path/rootfs" >/dev/null 2>&1 || true
+    umount -R -l "$path" >/dev/null 2>&1 || umount -l "$path" >/dev/null 2>&1 || true
+}
+
+detach_container_loop_devices() {
+    path="$1"
+    if ! has_cmd losetup; then
+        return
+    fi
+
+    for image in "$path"/rootfs.img "$path"/*.img; do
+        [ -e "$image" ] || continue
+        losetup -j "$image" 2>/dev/null | sed 's/:.*//' | while IFS= read -r loopdev; do
+            [ -n "$loopdev" ] || continue
+            losetup -d "$loopdev" >/dev/null 2>&1 || true
+        done
+    done
+}
+
+kill_path_users() {
+    path="$1"
+    if has_cmd fuser && [ -e "$path" ]; then
+        fuser -km "$path" >/dev/null 2>&1 || true
+    fi
+}
+
+remove_lxc_container_dir() {
+    container_dir="$1"
+    container_name="$(basename "$container_dir")"
+
+    if has_cmd lxc-stop; then
+        lxc-stop -n "$container_name" -k >/dev/null 2>&1 || true
+    fi
+    if has_cmd lxc-destroy; then
+        lxc-destroy -n "$container_name" -f >/dev/null 2>&1 || true
+    fi
+
+    unmount_path_tree "$container_dir"
+    detach_container_loop_devices "$container_dir"
+
+    if rm -rf "$container_dir" >/dev/null 2>&1; then
+        log "Removed $container_dir"
+        return
+    fi
+
+    log "Retrying removal after terminating processes using $container_dir..."
+    kill_path_users "$container_dir/rootfs"
+    kill_path_users "$container_dir"
+    unmount_path_tree "$container_dir"
+    detach_container_loop_devices "$container_dir"
+    rm -rf "$container_dir"
+    log "Removed $container_dir"
+}
+
 uninstall_clicd() {
     log "Uninstalling CLICD..."
 
@@ -89,14 +156,7 @@ uninstall_clicd() {
     log "Destroying LXC containers under /var/lib/lxc..."
     for container_dir in /var/lib/lxc/*; do
         [ -d "$container_dir" ] || continue
-        container_name="$(basename "$container_dir")"
-        if has_cmd lxc-stop; then
-            lxc-stop -n "$container_name" -k >/dev/null 2>&1 || true
-        fi
-        if has_cmd lxc-destroy; then
-            lxc-destroy -n "$container_name" -f >/dev/null 2>&1 || true
-        fi
-        remove_path "$container_dir"
+        remove_lxc_container_dir "$container_dir"
     done
 
     remove_path /etc/systemd/system/clicd.service
@@ -106,6 +166,7 @@ uninstall_clicd() {
     remove_path /var/log/clicd.log
     remove_path /var/log/clicd.err
     remove_path /root/.clicd
+    unmount_path_tree /var/lib/lxc
     remove_path /var/lib/lxc
     remove_path /var/cache/lxc
 

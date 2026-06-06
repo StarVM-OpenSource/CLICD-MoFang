@@ -454,10 +454,9 @@ export const batchAction = (action: string, containers: number[], templateId?: s
 export interface SubUser {
   id: string
   username: string
-  password: string
+  password?: string
   container_names: string[]
   container_uuids?: string[]
-  token: string
   access_code: string
   created_at: string
 }

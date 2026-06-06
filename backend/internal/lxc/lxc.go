@@ -367,6 +367,11 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	// Pre-configure network and SSH in the rootfs before first boot.
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
 	m.preconfigureNetwork(rootfsPath, cfg.TemplateID)
+	if ipv6 != "" {
+		if err := installContainerIPv6Init(rootfsPath, ipv6); err != nil {
+			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", lxcName, err)
+		}
+	}
 	if err := m.preconfigureSSH(rootfsPath, sshPassword, cfg.TemplateID); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s: %v\n", lxcName, err)
 	}
@@ -1419,6 +1424,9 @@ func (m *Manager) DestroyContainer(id int) error {
 		return fmt.Errorf("container not found: %d", id)
 	}
 	lxcName := c.LxcName()
+	if c.IPv6 != "" && c.IPv6Interface != "" {
+		removeIPv6NAT66(c.IPv6, c.IPv6Interface)
+	}
 
 	if err := m.StopContainer(id); err != nil {
 		return fmt.Errorf("failed to stop container before destroy: %v", err)
@@ -2101,6 +2109,11 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	// Set root password and pre-configure network/SSH via chroot.
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
 	m.preconfigureNetwork(rootfsPath, templateID)
+	if c.IPv6 != "" {
+		if err := installContainerIPv6Init(rootfsPath, c.IPv6); err != nil {
+			fmt.Printf("Warning: failed to install IPv6 init in %s after reinstall: %v\n", lxcName, err)
+		}
+	}
 	if c.SSHPassword == "" {
 		c.SSHPassword = generateRandomString(16)
 	}
@@ -2116,6 +2129,7 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 
 	// Update template and keep everything else the same
 	c.Template = templateID
+	c.SSHHostKey = ""
 	c.Status = "running"
 	config.SaveConfig()
 

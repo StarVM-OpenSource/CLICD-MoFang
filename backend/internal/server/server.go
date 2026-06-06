@@ -3,7 +3,9 @@ package server
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -18,18 +20,53 @@ var webFS http.FileSystem
 // corsMiddleware adds CORS headers
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := r.Header.Get("Origin"); origin != "" && isAllowedOrigin(origin, r.Host) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 
 		if r.Method == http.MethodOptions {
+			if origin := r.Header.Get("Origin"); origin != "" && !isAllowedOrigin(origin, r.Host) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
 		next(w, r)
 	}
+}
+
+func isAllowedOrigin(origin string, requestHost string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	originHost := normalizeHost(u.Host)
+	host := normalizeHost(requestHost)
+	if originHost == host {
+		return true
+	}
+	return isLoopbackHost(originHost) && isLoopbackHost(host)
+}
+
+func normalizeHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.ToLower(h)
+	}
+	return strings.ToLower(host)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // setupRoutes configures API and static routes

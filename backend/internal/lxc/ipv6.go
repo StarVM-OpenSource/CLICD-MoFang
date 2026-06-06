@@ -428,6 +428,12 @@ func (m *Manager) AssignIPv6(id int) (*config.Container, error) {
 	if err := m.applyIPv6Config(c.LxcName(), c.IPv6); err != nil {
 		return nil, err
 	}
+	rootfsPath := filepath.Join(m.LxcPath, c.LxcName(), "rootfs")
+	if _, err := os.Stat(rootfsPath); err == nil {
+		if err := installContainerIPv6Init(rootfsPath, c.IPv6); err != nil {
+			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", c.LxcName(), err)
+		}
+	}
 	if err := m.ApplyIPv6(id); err != nil {
 		return nil, err
 	}
@@ -477,6 +483,12 @@ func (m *Manager) ApplyIPv6(id int) error {
 		config.SaveConfig()
 	}
 
+	rootfsPath := filepath.Join(m.LxcPath, c.LxcName(), "rootfs")
+	if _, err := os.Stat(rootfsPath); err == nil {
+		if err := installContainerIPv6Init(rootfsPath, c.IPv6); err != nil {
+			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", c.LxcName(), err)
+		}
+	}
 	if err := ensureHostIPv6Routing(c.IPv6, c.IPv6Interface); err != nil {
 		return err
 	}
@@ -485,11 +497,15 @@ func (m *Manager) ApplyIPv6(id int) error {
 		return nil
 	}
 	cmd := exec.Command("lxc-attach", "-n", c.LxcName(), "--", "sh", "-c",
-		fmt.Sprintf("ip -6 addr replace %s/128 dev eth0 && ip -6 route replace default via %s dev eth0",
+		fmt.Sprintf("ip -6 addr replace %s/128 dev eth0 && ip -6 route replace default via %s dev eth0 metric 100",
 			shellQuote(c.IPv6), shellQuote(ipv6GatewayLinkLocal)))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to apply IPv6 inside container: %v, output: %s", err, string(output))
+	}
+	removeIPv6NAT66(c.IPv6, c.IPv6Interface)
+	if !containerIPv6ConnectivityOK(c.LxcName()) {
+		ensureIPv6NAT66(c.IPv6, c.IPv6Interface)
 	}
 	return nil
 }
@@ -513,6 +529,191 @@ func ensureHostIPv6Routing(ipv6, uplink string) error {
 	return nil
 }
 
+func installContainerIPv6Init(rootfsPath, ipv6 string) error {
+	if strings.TrimSpace(ipv6) == "" {
+		return nil
+	}
+	if _, err := netip.ParseAddr(ipv6); err != nil {
+		return fmt.Errorf("invalid IPv6 address %q: %w", ipv6, err)
+	}
+
+	scriptPath := filepath.Join(rootfsPath, "usr", "local", "sbin", "clicd-ipv6-init")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0755); err != nil {
+		return err
+	}
+	script := `#!/bin/sh
+IPV6_ADDR=` + shellQuote(ipv6) + `
+IPV6_GW=` + shellQuote(ipv6GatewayLinkLocal) + `
+IFACE="${CLICD_IPV6_IFACE:-eth0}"
+
+command -v ip >/dev/null 2>&1 || exit 0
+
+i=0
+while [ "$i" -lt 30 ]; do
+	if ip link show dev "$IFACE" >/dev/null 2>&1; then
+		break
+	fi
+	i=$((i + 1))
+	sleep 1
+done
+
+ip link set dev "$IFACE" up >/dev/null 2>&1 || true
+ip -6 addr replace "$IPV6_ADDR/128" dev "$IFACE" >/dev/null 2>&1 || true
+ip -6 route replace default via "$IPV6_GW" dev "$IFACE" metric 100 >/dev/null 2>&1 || true
+exit 0
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		return err
+	}
+
+	osRelease := ""
+	if data, err := os.ReadFile(filepath.Join(rootfsPath, "etc", "os-release")); err == nil {
+		osRelease = strings.ToLower(string(data))
+	}
+	hasSystemd := dirExists(filepath.Join(rootfsPath, "etc", "systemd", "system"))
+	hasOpenRC := fileExists(filepath.Join(rootfsPath, "sbin", "openrc-run")) || strings.Contains(osRelease, "alpine")
+
+	if hasSystemd {
+		if err := installContainerIPv6Systemd(rootfsPath); err != nil {
+			return err
+		}
+	}
+	if hasOpenRC {
+		if err := installContainerIPv6OpenRC(rootfsPath); err != nil {
+			return err
+		}
+	}
+	if !hasSystemd && !hasOpenRC {
+		if err := installContainerIPv6SysV(rootfsPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func installContainerIPv6Systemd(rootfsPath string) error {
+	servicePath := filepath.Join(rootfsPath, "etc", "systemd", "system", "clicd-ipv6.service")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0755); err != nil {
+		return err
+	}
+	service := `[Unit]
+Description=CLICD IPv6 setup
+After=network-online.target network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clicd-ipv6-init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+`
+	if err := os.WriteFile(servicePath, []byte(service), 0644); err != nil {
+		return err
+	}
+	wantsDir := filepath.Join(rootfsPath, "etc", "systemd", "system", "multi-user.target.wants")
+	if err := os.MkdirAll(wantsDir, 0755); err != nil {
+		return err
+	}
+	return replaceSymlink("../clicd-ipv6.service", filepath.Join(wantsDir, "clicd-ipv6.service"))
+}
+
+func installContainerIPv6OpenRC(rootfsPath string) error {
+	initPath := filepath.Join(rootfsPath, "etc", "init.d", "clicd-ipv6")
+	if err := os.MkdirAll(filepath.Dir(initPath), 0755); err != nil {
+		return err
+	}
+	initScript := `#!/sbin/openrc-run
+name="CLICD IPv6 setup"
+description="Apply CLICD IPv6 settings"
+
+depend() {
+	after net networking
+	need net
+}
+
+start() {
+	ebegin "Applying CLICD IPv6"
+	/usr/local/sbin/clicd-ipv6-init
+	eend $?
+}
+`
+	if err := os.WriteFile(initPath, []byte(initScript), 0755); err != nil {
+		return err
+	}
+	runlevelDir := filepath.Join(rootfsPath, "etc", "runlevels", "default")
+	if err := os.MkdirAll(runlevelDir, 0755); err != nil {
+		return err
+	}
+	return replaceSymlink(filepath.Join("..", "..", "init.d", "clicd-ipv6"), filepath.Join(runlevelDir, "clicd-ipv6"))
+}
+
+func installContainerIPv6SysV(rootfsPath string) error {
+	initDir := filepath.Join(rootfsPath, "etc", "init.d")
+	if err := os.MkdirAll(initDir, 0755); err != nil {
+		return err
+	}
+	initPath := filepath.Join(initDir, "clicd-ipv6")
+	initScript := `#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          clicd-ipv6
+# Required-Start:    $network
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: CLICD IPv6 setup
+### END INIT INFO
+
+case "$1" in
+	start|restart|force-reload)
+		/usr/local/sbin/clicd-ipv6-init
+		;;
+	stop|status)
+		exit 0
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|force-reload|status}"
+		exit 1
+		;;
+esac
+exit 0
+`
+	if err := os.WriteFile(initPath, []byte(initScript), 0755); err != nil {
+		return err
+	}
+	for _, level := range []string{"2", "3", "4", "5"} {
+		rcDir := filepath.Join(rootfsPath, "etc", "rc"+level+".d")
+		if !dirExists(rcDir) {
+			continue
+		}
+		if err := replaceSymlink(filepath.Join("..", "init.d", "clicd-ipv6"), filepath.Join(rcDir, "S99clicd-ipv6")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func replaceSymlink(target, linkPath string) error {
+	if current, err := os.Readlink(linkPath); err == nil && current == target {
+		return nil
+	}
+	if err := os.Remove(linkPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Symlink(target, linkPath)
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func ensureIPv6ForwardRules(ipv6 string) {
 	rules := [][]string{
 		{"FORWARD", "-i", "lxcbr0", "-s", ipv6 + "/128", "-j", "ACCEPT"},
@@ -524,6 +725,38 @@ func ensureIPv6ForwardRules(ipv6 string) {
 		if exec.Command("ip6tables", check...).Run() != nil {
 			exec.Command("ip6tables", add...).Run()
 		}
+	}
+}
+
+func containerIPv6ConnectivityOK(lxcName string) bool {
+	targets := []string{"2606:4700:4700::1111", "2001:4860:4860::8888"}
+	for _, target := range targets {
+		if exec.Command("lxc-attach", "-n", lxcName, "--", "ping", "-6", "-c", "1", "-W", "2", target).Run() == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureIPv6NAT66(ipv6, uplink string) {
+	if ipv6 == "" || uplink == "" {
+		return
+	}
+	rule := []string{"POSTROUTING", "-s", ipv6 + "/128", "-o", uplink, "-j", "MASQUERADE"}
+	check := append([]string{"-t", "nat", "-C"}, rule...)
+	add := append([]string{"-t", "nat", "-A"}, rule...)
+	if exec.Command("ip6tables", check...).Run() != nil {
+		exec.Command("ip6tables", add...).Run()
+	}
+}
+
+func removeIPv6NAT66(ipv6, uplink string) {
+	if ipv6 == "" || uplink == "" {
+		return
+	}
+	rule := []string{"POSTROUTING", "-s", ipv6 + "/128", "-o", uplink, "-j", "MASQUERADE"}
+	del := append([]string{"-t", "nat", "-D"}, rule...)
+	for exec.Command("ip6tables", del...).Run() == nil {
 	}
 }
 

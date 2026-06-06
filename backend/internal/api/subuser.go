@@ -21,6 +21,28 @@ func generateRandomStr(length int) string {
 	return hex.EncodeToString(b)[:length]
 }
 
+type subUserResponse struct {
+	ID             string   `json:"id"`
+	Username       string   `json:"username"`
+	Password       string   `json:"password,omitempty"`
+	ContainerNames []string `json:"container_names"`
+	ContainerUUIDs []string `json:"container_uuids,omitempty"`
+	AccessCode     string   `json:"access_code"`
+	CreatedAt      string   `json:"created_at"`
+}
+
+func newSubUserResponse(su config.SubUser, password string) subUserResponse {
+	return subUserResponse{
+		ID:             su.ID,
+		Username:       su.Username,
+		Password:       password,
+		ContainerNames: su.ContainerNames,
+		ContainerUUIDs: su.ContainerUUIDs,
+		AccessCode:     su.AccessCode,
+		CreatedAt:      su.CreatedAt,
+	}
+}
+
 // HandleSubUserCreate creates a sub-user for a specific container
 func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -47,29 +69,24 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 	// Check if sub-user already exists for this container
 	for i := range config.AppConfig.SubUsers {
 		su := &config.AppConfig.SubUsers[i]
-		for _, cn := range su.ContainerNames {
-			if cn == containerName {
+		for _, uuid := range su.ContainerUUIDs {
+			if uuid == c.UUID {
 				if su.AccessCode == "" {
 					su.AccessCode = generateRandomStr(8)
 				}
-				if su.PassHash == "" && su.Password != "" {
-					if hash, err := bcrypt.GenerateFromPassword([]byte(su.Password), bcrypt.DefaultCost); err == nil {
-						su.PassHash = string(hash)
-					}
+				password := generateRandomStr(16)
+				if hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
+					su.PassHash = string(hash)
 				}
-				if su.Password == "" {
-					su.Password = generateRandomStr(16)
-					if hash, err := bcrypt.GenerateFromPassword([]byte(su.Password), bcrypt.DefaultCost); err == nil {
-						su.PassHash = string(hash)
-					}
-				}
-				su.Token = newSubUserToken(su.Username, []string{c.UUID}, time.Now().AddDate(1, 0, 0))
+				su.Password = ""
+				su.Token = ""
+				su.ContainerNames = appendUniqueString(su.ContainerNames, containerName)
+				su.ContainerUUIDs = appendUniqueString(su.ContainerUUIDs, c.UUID)
 				config.SaveConfig()
-				// Return existing
 				jsonResponse(w, http.StatusOK, APIResponse{
 					Success: true,
-					Message: "Sub-user already exists",
-					Data:    *su,
+					Message: "Sub-user password rotated",
+					Data:    newSubUserResponse(*su, password),
 				})
 				return
 			}
@@ -84,16 +101,12 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 	// Generate short access code (8 chars, for URL sharing)
 	accessCode := generateRandomStr(8)
 
-	// Generate JWT for sub-user
-	tokenStr := newSubUserToken(username, []string{c.UUID}, time.Now().AddDate(1, 0, 0))
-
 	subUser := config.SubUser{
 		ID:             "sub-" + generateRandomStr(8),
 		Username:       username,
-		Password:       password,
 		PassHash:       string(hash),
 		ContainerNames: []string{containerName},
-		Token:          tokenStr,
+		ContainerUUIDs: []string{c.UUID},
 		AccessCode:     accessCode,
 		CreatedAt:      time.Now().Format("2006-01-02 15:04:05"),
 	}
@@ -102,7 +115,7 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 	config.SaveConfig()
 	config.AddAuditLog("创建子用户", containerName, fmt.Sprintf("用户: %s", username), "admin")
 
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Sub-user created", Data: subUser})
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Sub-user created", Data: newSubUserResponse(subUser, password)})
 }
 
 // HandleSubUserLogin handles sub-user login
@@ -126,7 +139,7 @@ func HandleSubUserLogin(w http.ResponseWriter, r *http.Request) {
 		if su.Username == req.Username {
 			if err := bcrypt.CompareHashAndPassword([]byte(su.PassHash), []byte(req.Password)); err == nil {
 				// Generate fresh token
-				containerUUIDs := subUserContainerUUIDs(su.ContainerNames)
+				containerUUIDs := activeSubUserContainerUUIDs(&su)
 				if len(containerUUIDs) == 0 {
 					jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "No active container is assigned to this user"})
 					return
@@ -173,7 +186,7 @@ func HandleSubUserAccessCode(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			containerUUIDs := subUserContainerUUIDs(su.ContainerNames)
+			containerUUIDs := activeSubUserContainerUUIDs(&su)
 			if len(containerUUIDs) == 0 {
 				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "No active container is assigned to this link"})
 				return
@@ -223,18 +236,6 @@ func subUserAllowedContainers(r *http.Request) (subUserAccess, bool) {
 	allowed := subUserAccess{
 		names: make(map[string]bool),
 		uuids: make(map[string]bool),
-	}
-	if containerNames, ok := claims["container_names"].([]interface{}); ok {
-		for _, cn := range containerNames {
-			if name, ok := cn.(string); ok {
-				allowed.names[name] = true
-			}
-		}
-	}
-	if containerNames, ok := claims["container_names"].([]string); ok {
-		for _, name := range containerNames {
-			allowed.names[name] = true
-		}
 	}
 	if containerUUIDs, ok := claims["container_uuids"].([]interface{}); ok {
 		for _, item := range containerUUIDs {
@@ -359,15 +360,27 @@ func filterTasksForRequest(r *http.Request, tasks []*Task) []*Task {
 	}
 	filtered := make([]*Task, 0, len(tasks))
 	for _, task := range tasks {
-		if allowed.names[task.ContainerName] || (task.Config.Name != "" && allowed.names[task.Config.Name]) {
+		if c := config.FindContainer(task.ContainerID); c != nil && isContainerAllowed(allowed, c) {
 			filtered = append(filtered, task)
+			continue
+		}
+		if task.ContainerName != "" {
+			if c := config.FindContainerByName(task.ContainerName); c != nil && isContainerAllowed(allowed, c) {
+				filtered = append(filtered, task)
+				continue
+			}
+		}
+		if task.Config.Name != "" {
+			if c := config.FindContainerByName(task.Config.Name); c != nil && isContainerAllowed(allowed, c) {
+				filtered = append(filtered, task)
+			}
 		}
 	}
 	return filtered
 }
 
 func isContainerAllowed(allowed subUserAccess, c *config.Container) bool {
-	return allowed.names[c.Name] || (c.UUID != "" && allowed.uuids[c.UUID])
+	return c != nil && c.UUID != "" && allowed.uuids[c.UUID]
 }
 
 func isSubUserContainerActionAllowed(action string, method string) bool {
@@ -392,14 +405,36 @@ func isSubUserContainerActionAllowed(action string, method string) bool {
 	}
 }
 
+func activeSubUserContainerUUIDs(su *config.SubUser) []string {
+	uuids := make([]string, 0, len(su.ContainerUUIDs))
+	for _, uuid := range su.ContainerUUIDs {
+		if c := config.FindContainerByUUID(uuid); c != nil {
+			uuids = appendUniqueString(uuids, c.UUID)
+		}
+	}
+	if len(uuids) > 0 {
+		return uuids
+	}
+	return subUserContainerUUIDs(su.ContainerNames)
+}
+
 func subUserContainerUUIDs(containerNames []string) []string {
 	uuids := make([]string, 0, len(containerNames))
 	for _, name := range containerNames {
 		if c := config.FindContainerByName(name); c != nil && c.UUID != "" {
-			uuids = append(uuids, c.UUID)
+			uuids = appendUniqueString(uuids, c.UUID)
 		}
 	}
 	return uuids
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func splitPath(path string) []string {

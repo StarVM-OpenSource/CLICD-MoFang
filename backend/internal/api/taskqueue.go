@@ -442,6 +442,10 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 				templateID = c.Template
 			}
 		}
+		if !isTemplateEnabledAndDownloaded(templateID) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
+			return
+		}
 		taskType = TaskReinstall
 	default:
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Unknown action"})
@@ -503,6 +507,10 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Containers[i].DiskGB < 1 {
 			req.Containers[i].DiskGB = 5
+		}
+		if !isTemplateEnabledAndDownloaded(req.Containers[i].TemplateID) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: name + ": template is not enabled or downloaded"})
+			return
 		}
 		if req.Containers[i].PortMappingCount < 2 {
 			req.Containers[i].PortMappingCount = 2

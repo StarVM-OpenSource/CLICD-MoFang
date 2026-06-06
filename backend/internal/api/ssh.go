@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -73,7 +74,7 @@ func HandleWebSSHTicket(w http.ResponseWriter, r *http.Request) {
 
 // HandleWebSSH proxies an SSH session to the browser over WebSocket.
 func HandleWebSSH(w http.ResponseWriter, r *http.Request) {
-	ticket := r.URL.Query().Get("ticket")
+	ticket := webSSHTicketFromRequest(r)
 	if ticket == "" {
 		http.Error(w, "ticket required", http.StatusUnauthorized)
 		return
@@ -114,7 +115,11 @@ func HandleWebSSH(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "container ip is not available", http.StatusBadRequest)
 		return
 	}
-	ws, err := upgrader.Upgrade(w, r, nil)
+	responseHeader := http.Header{}
+	if protocol := webSSHTicketProtocol(r); protocol != "" {
+		responseHeader.Set("Sec-WebSocket-Protocol", protocol)
+	}
+	ws, err := upgrader.Upgrade(w, r, responseHeader)
 	if err != nil {
 		log.Printf("WebSSH upgrade failed: %v", err)
 		return
@@ -141,7 +146,7 @@ func HandleWebSSH(w http.ResponseWriter, r *http.Request) {
 		Auth: []ssh.AuthMethod{
 			ssh.Password(c.SSHPassword),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: containerHostKeyCallback(c),
 		Timeout:         4 * time.Second,
 	}
 
@@ -248,6 +253,41 @@ func HandleWebSSH(w http.ResponseWriter, r *http.Request) {
 	<-done
 	_ = session.Signal(ssh.SIGTERM)
 	log.Printf("WebSSH disconnected for container %s", containerName)
+}
+
+func containerHostKeyCallback(c *config.Container) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		sum := sha256.Sum256(key.Marshal())
+		fingerprint := hex.EncodeToString(sum[:])
+		if c.SSHHostKey != "" && c.SSHHostKey != fingerprint {
+			return fmt.Errorf("container SSH host key mismatch")
+		}
+		if c.SSHHostKey == "" {
+			c.SSHHostKey = fingerprint
+			config.SaveConfig()
+		}
+		return nil
+	}
+}
+
+func webSSHTicketFromRequest(r *http.Request) string {
+	for _, protocol := range websocket.Subprotocols(r) {
+		const prefix = "clicd-ticket."
+		if len(protocol) > len(prefix) && protocol[:len(prefix)] == prefix {
+			return protocol[len(prefix):]
+		}
+	}
+	return ""
+}
+
+func webSSHTicketProtocol(r *http.Request) string {
+	for _, protocol := range websocket.Subprotocols(r) {
+		const prefix = "clicd-ticket."
+		if len(protocol) > len(prefix) && protocol[:len(prefix)] == prefix {
+			return protocol
+		}
+	}
+	return ""
 }
 
 func streamSSHOutput(ws *websocket.Conn, writeMu *sync.Mutex, src io.Reader, done chan<- struct{}) {

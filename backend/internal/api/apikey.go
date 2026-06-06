@@ -2,6 +2,8 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"net"
@@ -11,8 +13,6 @@ import (
 	"time"
 
 	"clicd/internal/config"
-
-	"github.com/golang-jwt/jwt/v5"
 )
 
 type ApiKey struct {
@@ -116,6 +116,11 @@ func generateShortID() string {
 
 // hashKey creates a simple hash for storage (not reversible)
 func hashKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+func legacyHashKey(key string) string {
 	b := make([]byte, 32)
 	for i := range key {
 		b[i%32] ^= key[i]
@@ -126,8 +131,10 @@ func hashKey(key string) string {
 // validateApiKey checks if the given key is valid and IP is allowed
 func validateApiKey(rawKey, clientIP string) bool {
 	hashed := hashKey(rawKey)
+	legacyHashed := legacyHashKey(rawKey)
 	for _, k := range config.AppConfig.ApiKeys {
-		if k.KeyHash == hashed {
+		if subtle.ConstantTimeCompare([]byte(k.KeyHash), []byte(hashed)) == 1 ||
+			subtle.ConstantTimeCompare([]byte(k.KeyHash), []byte(legacyHashed)) == 1 {
 			if k.IPWhitelist == "" {
 				return true
 			}
@@ -135,6 +142,29 @@ func validateApiKey(rawKey, clientIP string) bool {
 		}
 	}
 	return false
+}
+
+func apiKeyFromRequest(r *http.Request) string {
+	if apiKey := strings.TrimSpace(r.Header.Get("X-API-Key")); apiKey != "" {
+		return apiKey
+	}
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer clicd_sk_") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
+}
+
+func isValidApiKeyRequest(r *http.Request) bool {
+	apiKey := apiKeyFromRequest(r)
+	if apiKey == "" {
+		return false
+	}
+	if !validateApiKey(apiKey, clientIP(r)) {
+		return false
+	}
+	updateApiKeyLastUsed(apiKey)
+	return true
 }
 
 // isIPAllowed checks if clientIP matches any entry in the whitelist
@@ -211,51 +241,14 @@ func updateApiKeyLastUsed(rawKey string) {
 	}
 }
 
-// ApiKeyMiddleware authenticates requests via X-API-Key header or ?api_key query param
+// ApiKeyMiddleware authenticates requests via X-API-Key header or Authorization bearer.
 func ApiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Check header
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == "" {
-			// Check query param
-			apiKey = r.URL.Query().Get("api_key")
-		}
-		if apiKey == "" {
-			// Check Bearer token (some clients use this)
-			auth := r.Header.Get("Authorization")
-			if strings.HasPrefix(auth, "Bearer clicd_sk_") {
-				apiKey = strings.TrimPrefix(auth, "Bearer ")
-			}
-		}
-
-		// Get client IP
-		clientIP := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			clientIP = strings.Split(forwarded, ",")[0]
-		}
-		if apiKey == "" || !validateApiKey(apiKey, clientIP) {
+		apiKey := apiKeyFromRequest(r)
+		if apiKey == "" || !validateApiKey(apiKey, clientIP(r)) {
 			jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid API key or IP not in whitelist"})
 			return
 		}
-
-		// Generate a short-lived JWT so downstream admin middleware passes
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"username": config.AppConfig.AdminUser,
-			"api_key":  true,
-			"exp":      time.Now().Add(5 * time.Minute).Unix(),
-			"iat":      time.Now().Unix(),
-		})
-		tokenString, _ := token.SignedString([]byte(config.AppConfig.JWTSecret))
-
-		// Set cookie for subsequent requests
-		http.SetCookie(w, &http.Cookie{
-			Name:     "clicd_token",
-			Value:    tokenString,
-			Path:     "/",
-			HttpOnly: false,
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   300,
-		})
 
 		updateApiKeyLastUsed(apiKey)
 		next(w, r)

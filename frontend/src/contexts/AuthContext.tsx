@@ -41,9 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (savedToken) {
       const payload = decodeTokenPayload(savedToken)
       const nextUsername = payload?.username || payload?.sub_user || savedUsername || null
-      const nextContainerIdentifiers = Array.isArray(payload?.container_uuids) && payload.container_uuids.length > 0
-        ? payload.container_uuids
-        : Array.isArray(payload?.container_names) ? payload.container_names : []
+      const nextContainerIdentifiers = Array.isArray(payload?.container_uuids) ? payload.container_uuids : []
 
       setToken(savedToken)
       setUsername(nextUsername)
@@ -123,7 +121,6 @@ export function useAuth() {
 type TokenPayload = {
   username?: string
   sub_user?: string
-  container_names?: string[]
   container_uuids?: string[]
 }
 

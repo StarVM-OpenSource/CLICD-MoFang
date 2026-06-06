@@ -52,3 +52,13 @@ curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh 
 ![alt text](/img/image.png)
 ![alt text](/img/image-1.png)
 ![alt text](/img/image-2.png)
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=MengMengCode%2FCLICD&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=MengMengCode/CLICD&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=MengMengCode/CLICD&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=MengMengCode/CLICD&type=date&legend=top-left" />
+ </picture>
+</a>

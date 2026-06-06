@@ -91,6 +91,7 @@ type Container struct {
 	VNCPort                       int           `json:"vnc_port"`
 	SSHPort                       int           `json:"ssh_port"`
 	SSHPassword                   string        `json:"ssh_password"`
+	SSHHostKey                    string        `json:"ssh_host_key,omitempty"`
 	PortMappings                  []PortMapping `json:"port_mappings"`
 	PortMappingLimit              int           `json:"port_mapping_limit"`
 	SnapshotLimit                 int           `json:"snapshot_limit"`
@@ -138,10 +139,11 @@ func DeleteApiKey(id string) {
 type SubUser struct {
 	ID             string   `json:"id"`
 	Username       string   `json:"username"`
-	Password       string   `json:"password"` // plaintext for display
+	Password       string   `json:"-"`
 	PassHash       string   `json:"pass_hash"`
 	ContainerNames []string `json:"container_names"`
-	Token          string   `json:"token"`
+	ContainerUUIDs []string `json:"container_uuids,omitempty"`
+	Token          string   `json:"-"`
 	AccessCode     string   `json:"access_code"`
 	CreatedAt      string   `json:"created_at"`
 }
@@ -345,6 +347,9 @@ func InitConfig() (*ClicdConfig, error) {
 	if ensureContainerSnapshotScheduleDefaults() {
 		changed = true
 	}
+	if migrateSubUsers() {
+		changed = true
+	}
 	if removeLegacyVNCMappings() {
 		changed = true
 	}
@@ -422,6 +427,47 @@ func ensureContainerSnapshotLimits() bool {
 	return changed
 }
 
+func migrateSubUsers() bool {
+	changed := false
+	for i := range AppConfig.SubUsers {
+		su := &AppConfig.SubUsers[i]
+		if su.PassHash == "" && su.Password != "" {
+			if hash, err := bcrypt.GenerateFromPassword([]byte(su.Password), bcrypt.DefaultCost); err == nil {
+				su.PassHash = string(hash)
+				changed = true
+			}
+		}
+		if su.Password != "" {
+			su.Password = ""
+			changed = true
+		}
+		if su.Token != "" {
+			su.Token = ""
+			changed = true
+		}
+		if len(su.ContainerUUIDs) == 0 && len(su.ContainerNames) > 0 {
+			for _, name := range su.ContainerNames {
+				if c := FindContainerByName(name); c != nil && c.UUID != "" {
+					su.ContainerUUIDs = appendUniqueString(su.ContainerUUIDs, c.UUID)
+				}
+			}
+			if len(su.ContainerUUIDs) > 0 {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 func NormalizeSnapshotLimit(limit int) int {
 	if limit <= 0 {
 		return DefaultSnapshotLimit
@@ -488,7 +534,7 @@ func AllocateContainerID() int {
 func RemoveContainer(id int) bool {
 	for i, c := range AppConfig.Containers {
 		if c.ID == id {
-			removeSubUserContainerAccess(c.Name)
+			removeSubUserContainerAccess(c.Name, c.UUID)
 			removeContainerSnapshotMetadata(id)
 			AppConfig.Containers = append(AppConfig.Containers[:i], AppConfig.Containers[i+1:]...)
 			SaveConfig()
@@ -543,8 +589,13 @@ func removeContainerSnapshotMetadata(containerID int) {
 	AppConfig.Snapshots = filtered
 }
 
-func removeSubUserContainerAccess(containerName string) {
-	if containerName == "" || len(AppConfig.SubUsers) == 0 {
+func RemoveSubUserContainerAccess(containerName string, containerUUID string) {
+	removeSubUserContainerAccess(containerName, containerUUID)
+	SaveConfig()
+}
+
+func removeSubUserContainerAccess(containerName string, containerUUID string) {
+	if containerName == "" && containerUUID == "" || len(AppConfig.SubUsers) == 0 {
 		return
 	}
 	filteredUsers := make([]SubUser, 0, len(AppConfig.SubUsers))
@@ -555,10 +606,17 @@ func removeSubUserContainerAccess(containerName string) {
 				filteredNames = append(filteredNames, name)
 			}
 		}
-		if len(filteredNames) == 0 {
+		filteredUUIDs := make([]string, 0, len(su.ContainerUUIDs))
+		for _, uuid := range su.ContainerUUIDs {
+			if uuid != containerUUID {
+				filteredUUIDs = append(filteredUUIDs, uuid)
+			}
+		}
+		if len(filteredNames) == 0 && len(filteredUUIDs) == 0 {
 			continue
 		}
 		su.ContainerNames = filteredNames
+		su.ContainerUUIDs = filteredUUIDs
 		filteredUsers = append(filteredUsers, su)
 	}
 	AppConfig.SubUsers = filteredUsers

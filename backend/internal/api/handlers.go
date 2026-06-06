@@ -107,6 +107,10 @@ func createContainer(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Template is required"})
 		return
 	}
+	if !isTemplateEnabledAndDownloaded(cfg.TemplateID) {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
+		return
+	}
 	if cfg.VCPU <= 0 {
 		cfg.VCPU = 1
 	}
@@ -314,6 +318,10 @@ func getRandomPort(w http.ResponseWriter, r *http.Request, id int) {
 func HandleTemplates(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if isSubUserRequest(r) {
+		HandleEnabledImages(w, r)
 		return
 	}
 	templates := lxc.GetTemplates()

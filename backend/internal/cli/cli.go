@@ -399,7 +399,67 @@ func destroyAllLXCContainers() {
 		fmt.Printf("Destroying LXC container %s...\n", name)
 		runQuiet("lxc-stop", "-n", name, "-k")
 		runQuiet("lxc-destroy", "-n", name, "-f")
-		removePath("/var/lib/lxc/" + name)
+		removeLXCContainerPath("/var/lib/lxc/" + name)
+	}
+}
+
+func removeLXCContainerPath(path string) {
+	unmountPathTree(path)
+	detachLoopDevices(path)
+	if err := os.RemoveAll(path); err == nil {
+		fmt.Printf("Removed %s\n", path)
+		return
+	}
+
+	runQuiet("fuser", "-km", path+"/rootfs")
+	runQuiet("fuser", "-km", path)
+	unmountPathTree(path)
+	detachLoopDevices(path)
+	removePath(path)
+}
+
+func unmountPathTree(path string) {
+	if commandExists("findmnt") {
+		out, err := exec.Command("findmnt", "-R", "-n", "-o", "TARGET", path).Output()
+		if err == nil {
+			mounts := strings.Split(strings.TrimSpace(string(out)), "\n")
+			for i := len(mounts) - 1; i >= 0; i-- {
+				mountpoint := strings.TrimSpace(mounts[i])
+				if mountpoint != "" {
+					runQuiet("umount", "-R", "-l", mountpoint)
+					runQuiet("umount", "-l", mountpoint)
+				}
+			}
+		}
+	}
+	runQuiet("umount", "-R", "-l", path+"/rootfs")
+	runQuiet("umount", "-l", path+"/rootfs")
+	runQuiet("umount", "-R", "-l", path)
+	runQuiet("umount", "-l", path)
+}
+
+func detachLoopDevices(path string) {
+	if !commandExists("losetup") {
+		return
+	}
+	images := []string{path + "/rootfs.img"}
+	if entries, err := os.ReadDir(path); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".img") {
+				images = append(images, path+"/"+entry.Name())
+			}
+		}
+	}
+	for _, image := range images {
+		out, err := exec.Command("losetup", "-j", image).Output()
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if idx := strings.Index(line, ":"); idx > 0 {
+				runQuiet("losetup", "-d", line[:idx])
+			}
+		}
 	}
 }
 

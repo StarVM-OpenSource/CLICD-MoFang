@@ -272,6 +272,15 @@ func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: result})
 }
 
+func isTemplateEnabledAndDownloaded(templateID string) bool {
+	tmpl := lxc.FindTemplate(templateID)
+	if tmpl == nil {
+		return false
+	}
+	enabledSet := getEnabledImageSet()
+	return enabledSet[tmpl.ID] && isImageDownloaded(tmpl.Distro, tmpl.Release, tmpl.Arch)
+}
+
 func ensureImageEnabled(id string) {
 	// If the enabled list is empty, all templates are currently enabled by default.
 	// We must populate the list with all template IDs first so that explicit toggles stick.

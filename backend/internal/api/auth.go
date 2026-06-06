@@ -100,10 +100,7 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := r.RemoteAddr
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		ip = forwarded
-	}
+	ip := clientIP(r)
 	ua := r.Header.Get("User-Agent")
 
 	if req.Username != config.AppConfig.AdminUser {
@@ -192,7 +189,7 @@ func HandleCheckAuth(w http.ResponseWriter, r *http.Request) {
 func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenString := tokenFromRequest(r)
-		if !isValidToken(tokenString) {
+		if !isValidToken(tokenString) && !isValidApiKeyRequest(r) {
 			jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Authentication required"})
 			return
 		}
