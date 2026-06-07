@@ -94,6 +94,7 @@ export interface Template {
   release: string
   arch: string
   variant?: string
+  desktop?: string
   description: string
 }
 
@@ -359,6 +360,7 @@ export interface ImageInfo {
   downloading: boolean
   size_bytes: number
   manual_path?: string
+  desktop?: string
 }
 
 export const getImages = () =>

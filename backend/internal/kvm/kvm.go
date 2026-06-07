@@ -371,13 +371,21 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		}
 		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps)
 	} else {
+		if image.Desktop != "" {
+			if cfg.RAMMB < 2048 {
+				cfg.RAMMB = 2048
+			}
+			if cfg.DiskGB < 20 {
+				cfg.DiskGB = 20
+			}
+		}
 		if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
 			return nil, err
 		}
-		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, mac, ipv6); err != nil {
+		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, mac, ipv6, *image); err != nil {
 			return nil, err
 		}
-		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps)
+		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps, image.Desktop != "")
 	}
 	xmlPath := filepath.Join(m.instanceDir(vmName), "domain.xml")
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
@@ -706,7 +714,7 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps)
+		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps, isKVMDesktopTemplate(c.Template))
 	}
 	xmlPath := filepath.Join(m.instanceDir(c.VirshName()), "domain.xml")
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
@@ -731,7 +739,7 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps)
+		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps, isKVMDesktopTemplate(c.Template))
 	}
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
 		return err
@@ -1668,8 +1676,11 @@ func shellQuoteWindows(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 }
 
-func createSeedISO(seedPath, instanceID, hostname, password, mac, ipv6 string) error {
+func createSeedISO(seedPath, instanceID, hostname, password, mac, ipv6 string, image Image) error {
 	guestSetup := kvmSSHSetupScript(password)
+	if desktopSetup := kvmDesktopSetupScript(image); desktopSetup != "" {
+		guestSetup += "\n" + desktopSetup
+	}
 	if strings.TrimSpace(ipv6) != "" {
 		guestSetup += "\n" + kvmIPv6SetupScript(ipv6)
 	}
@@ -1743,7 +1754,12 @@ func indentScript(script string, spaces int) string {
 	return strings.Join(lines, "\n")
 }
 
-func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioSpeedMBps int, networkBWMbps int) string {
+func isKVMDesktopTemplate(templateID string) bool {
+	image := FindImage(templateID)
+	return image != nil && image.Desktop != ""
+}
+
+func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioSpeedMBps int, networkBWMbps int, desktop bool) string {
 	if vcpu < 1 {
 		vcpu = 1
 	}
@@ -1766,6 +1782,12 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
         <inbound average='%d'/>
         <outbound average='%d'/>
       </bandwidth>`, averageKiB, averageKiB)
+	}
+	video := "<video><model type='virtio'/></video>"
+	input := ""
+	if desktop {
+		video = "<video><model type='qxl' ram='65536' vram='65536' heads='1' primary='yes'/></video>"
+		input = "\n\t    <input type='tablet' bus='usb'/>"
 	}
 	return fmt.Sprintf(`<domain type='kvm'>
   <name>%s</name>
@@ -1810,10 +1832,10 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
     <memballoon model='virtio'>
       <stats period='10'/>
     </memballoon>
-    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
-    <video><model type='virtio'/></video>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>%s
+    %s
   </devices>
-</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, xmlEscape(diskPath), iotune, xmlEscape(seedPath), xmlEscape(mac), bandwidth)
+</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, xmlEscape(diskPath), iotune, xmlEscape(seedPath), xmlEscape(mac), bandwidth, input, video)
 }
 
 func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioSpeedMBps int, networkBWMbps int) string {
@@ -2259,6 +2281,64 @@ if command -v chvt >/dev/null 2>&1; then
 fi
 if [ -w /dev/tty1 ]; then
 	printf '\nCLICD VNC console is ready. Press Enter for login prompt.\n' >/dev/tty1 || true
+fi
+`
+}
+
+func kvmDesktopSetupScript(image Image) string {
+	if strings.ToLower(strings.TrimSpace(image.Desktop)) != "xfce" {
+		return ""
+	}
+	packages := ""
+	switch image.Distro {
+	case "ubuntu":
+		packages = "xubuntu-desktop"
+	case "debian":
+		packages = "task-xfce-desktop"
+	default:
+		return ""
+	}
+	return `if command -v apt-get >/dev/null 2>&1; then
+	{
+		exec >>/var/log/clicd-desktop-setup.log 2>&1
+		echo "CLICD XFCE setup started at $(date -Is)"
+		export DEBIAN_FRONTEND=noninteractive
+		export APT_LISTCHANGES_FRONTEND=none
+		apt-get update || true
+		apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold ` + packages + ` || apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold xfce4 lightdm lightdm-gtk-greeter dbus-x11 xorg || true
+		if command -v useradd >/dev/null 2>&1 && ! id clicd >/dev/null 2>&1; then
+			useradd -m -s /bin/bash clicd || true
+		fi
+		if command -v chpasswd >/dev/null 2>&1 && id clicd >/dev/null 2>&1; then
+			printf 'clicd:%s\n' "$ROOT_PASSWORD" | chpasswd || true
+		fi
+		usermod -aG sudo clicd >/dev/null 2>&1 || true
+		usermod -aG autologin clicd >/dev/null 2>&1 || true
+		if id clicd >/dev/null 2>&1; then
+			printf 'startxfce4\n' >/home/clicd/.xsession || true
+			chown clicd:clicd /home/clicd/.xsession >/dev/null 2>&1 || true
+		fi
+		mkdir -p /etc/lightdm/lightdm.conf.d
+		cat >/etc/lightdm/lightdm.conf.d/50-clicd-autologin.conf <<'EOF'
+[Seat:*]
+autologin-user=clicd
+autologin-user-timeout=0
+user-session=xfce
+greeter-session=lightdm-gtk-greeter
+EOF
+		if [ -x /usr/sbin/lightdm ]; then
+			printf '/usr/sbin/lightdm\n' >/etc/X11/default-display-manager || true
+		fi
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl daemon-reload >/dev/null 2>&1 || true
+			systemctl set-default graphical.target >/dev/null 2>&1 || true
+			systemctl enable display-manager.service >/dev/null 2>&1 || true
+			systemctl enable lightdm.service >/dev/null 2>&1 || true
+			systemctl restart lightdm.service >/dev/null 2>&1 || systemctl start lightdm.service >/dev/null 2>&1 || true
+		fi
+		apt-get clean || true
+		echo "CLICD XFCE setup finished at $(date -Is)"
+	} || true
 fi
 `
 }

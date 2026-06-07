@@ -12,6 +12,7 @@ type Image struct {
 	Arch        string `json:"arch"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
+	Desktop     string `json:"desktop,omitempty"`
 }
 
 func GetImages() []Image {
@@ -21,6 +22,13 @@ func GetImages() []Image {
 			Distro: "ubuntu", Release: "noble", Arch: "amd64",
 			Description: "Ubuntu 24.04 LTS cloud image for KVM",
 			URL:         "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+		},
+		{
+			ID: "kvm-ubuntu-noble-xfce", Name: "Ubuntu 24.04 XFCE KVM",
+			Distro: "ubuntu", Release: "noble", Arch: "amd64",
+			Description: "Ubuntu 24.04 LTS cloud image with XFCE desktop provisioned via cloud-init",
+			URL:         "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+			Desktop:     "xfce",
 		},
 		{
 			ID: "kvm-ubuntu-jammy", Name: "Ubuntu 22.04 KVM",
@@ -33,6 +41,13 @@ func GetImages() []Image {
 			Distro: "debian", Release: "bookworm", Arch: "amd64",
 			Description: "Debian 12 generic cloud image for KVM",
 			URL:         "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
+		},
+		{
+			ID: "kvm-debian-bookworm-xfce", Name: "Debian 12 XFCE KVM",
+			Distro: "debian", Release: "bookworm", Arch: "amd64",
+			Description: "Debian 12 generic cloud image with XFCE desktop provisioned via cloud-init",
+			URL:         "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
+			Desktop:     "xfce",
 		},
 		{
 			ID: "kvm-debian-bullseye", Name: "Debian 11 KVM",

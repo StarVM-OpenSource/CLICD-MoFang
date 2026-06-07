@@ -28,6 +28,7 @@ type ImageInfo struct {
 	Downloading bool   `json:"downloading"`
 	SizeBytes   int64  `json:"size_bytes"`
 	ManualPath  string `json:"manual_path,omitempty"`
+	Desktop     string `json:"desktop,omitempty"`
 }
 
 var imageDownloadsMu sync.Mutex
@@ -140,6 +141,7 @@ func HandleImages(w http.ResponseWriter, r *http.Request) {
 			Downloading: downloading,
 			SizeBytes:   size,
 			ManualPath:  manualPath,
+			Desktop:     t.Desktop,
 		})
 	}
 
@@ -336,7 +338,7 @@ func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 			if downloaded, _ := kvm.ImageDownloadedInfo(t.ID); enabledSet[t.ID] && downloaded {
 				result = append(result, map[string]string{
 					"id": t.ID, "name": t.Name, "distro": t.Distro, "release": t.Release, "arch": t.Arch,
-					"description": t.Description, "type": config.VirtualizationKVM,
+					"description": t.Description, "type": config.VirtualizationKVM, "desktop": t.Desktop,
 				})
 			}
 		}
