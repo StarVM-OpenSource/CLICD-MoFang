@@ -20,6 +20,11 @@ import (
 
 var manager = lxc.NewManager()
 
+const (
+	clicdBackupDir     = "/root/clicd-backups"
+	clicdNewBinaryPath = "/usr/local/bin/clicd.new"
+)
+
 // Run starts the CLI interface.
 func Run() {
 	reader := bufio.NewReader(os.Stdin)
@@ -198,9 +203,16 @@ func cliCreateContainer(reader *bufio.Reader) {
 	container := config.FindContainerByName(name)
 	fmt.Printf("容器 %s 创建成功\n", name)
 	if container != nil {
-		fmt.Printf("SSH: root / %s, port %d -> 22\n", container.SSHPassword, container.SSHPort)
+		fmt.Print(formatSSHAccess(container.SSHPort))
 	}
 	restartWebPanelForConfigChange()
+}
+
+func formatSSHAccess(sshPort int) string {
+	if sshPort <= 0 {
+		return "SSH: root, 端口未分配。密码已保存，请在 Web 面板中查看或重置。\n"
+	}
+	return fmt.Sprintf("SSH: root, port %d -> 22。密码已保存，请在 Web 面板中查看或重置。\n", sshPort)
 }
 
 func cliStartContainer(reader *bufio.Reader) {
@@ -532,13 +544,14 @@ func upgradeFromReleaseAsset(assetURL, latest string) error {
 		return err
 	}
 
-	backupDir := "/root/clicd-backups"
+	backupDir := clicdBackupDir
 	if err := os.MkdirAll(backupDir, 0700); err != nil {
 		return err
 	}
-	backupPath := filepath.Join(backupDir, fmt.Sprintf("clicd.%s.%s", strings.TrimPrefix(latest, "v"), time.Now().Format("20060102-150405")))
+	backupName := fmt.Sprintf("clicd.%s.%s", safeReleaseBackupComponent(latest), time.Now().Format("20060102-150405"))
 	if _, err := os.Stat("/usr/local/bin/clicd"); err == nil {
-		if err := copyFile("/usr/local/bin/clicd", backupPath, 0755); err != nil {
+		backupPath, err := copyFileToBackup("/usr/local/bin/clicd", backupName, 0755)
+		if err != nil {
 			return fmt.Errorf("备份旧二进制失败: %w", err)
 		}
 		fmt.Printf("旧版本已备份: %s\n", backupPath)
@@ -548,8 +561,8 @@ func upgradeFromReleaseAsset(assetURL, latest string) error {
 	if err := stopService("clicd"); err != nil {
 		fmt.Printf("停止 Web 服务失败，继续尝试替换: %v\n", err)
 	}
-	tmpBin := "/usr/local/bin/clicd.new"
-	if err := copyFile(newBinary, tmpBin, 0755); err != nil {
+	tmpBin := clicdNewBinaryPath
+	if err := copyFileToUpgradeTemp(newBinary, 0755); err != nil {
 		return err
 	}
 	if err := os.Rename(tmpBin, "/usr/local/bin/clicd"); err != nil {
@@ -614,25 +627,69 @@ func findFile(root, name string) (string, error) {
 	return found, nil
 }
 
-func copyFile(src, dst string, mode os.FileMode) error {
+func copyFileToBackup(src, fileName string, mode os.FileMode) (string, error) {
+	if fileName == "" || strings.Contains(fileName, "/") || strings.Contains(fileName, "\\") || strings.Contains(fileName, "..") {
+		return "", fmt.Errorf("unsafe backup file name: %s", fileName)
+	}
+	dst := filepath.Join(clicdBackupDir, fileName)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return "", err
+	}
+	if err := copyIntoOpenFile(src, out, mode); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+func copyFileToUpgradeTemp(src string, mode os.FileMode) error {
+	out, err := os.OpenFile(clicdNewBinaryPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	return copyIntoOpenFile(src, out, mode)
+}
+
+func copyIntoOpenFile(src string, out *os.File, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
+		out.Close()
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
-	if err != nil {
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if err := out.Chmod(mode); err != nil {
 		out.Close()
 		return err
 	}
 	if err := out.Close(); err != nil {
 		return err
 	}
-	return os.Chmod(dst, mode)
+	return nil
+}
+
+func safeReleaseBackupComponent(tag string) string {
+	tag = strings.TrimPrefix(strings.TrimSpace(tag), "v")
+	var b strings.Builder
+	for _, r := range tag {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	component := strings.Trim(b.String(), "._-")
+	if component == "" {
+		return "unknown"
+	}
+	if len(component) > 64 {
+		return component[:64]
+	}
+	return component
 }
 
 func sameVersion(current, latest string) bool {

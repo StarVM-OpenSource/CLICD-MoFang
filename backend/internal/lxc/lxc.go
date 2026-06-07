@@ -402,9 +402,10 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 
 	// Set root password AFTER shiftRootfsForUnprivileged,
 	// otherwise /etc/shadow ownership breaks and SSHD cannot authenticate.
-	setCmd := m.rootfsCommand(rootfsPath,
-		"sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(sshPassword)))
-	setCmd.Run()
+	if err := m.runRootfsCommand(rootfsPath,
+		"sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(sshPassword))); err != nil {
+		fmt.Printf("Warning: failed to set root password in %s: %v\n", lxcName, err)
+	}
 
 	fmt.Printf("Container %d (%s) created successfully\n", id, cfg.Name)
 	return nil
@@ -429,7 +430,7 @@ func (m *Manager) preconfigureNetwork(rootfsPath, templateID string) {
 		content := "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n"
 		_ = os.MkdirAll(filepath.Dir(interfaces), 0755)
 		_ = os.WriteFile(interfaces, []byte(content), 0644)
-		_ = exec.Command("chroot", rootfsPath, "rc-update", "add", "networking", "boot").Run()
+		_ = m.runRootfsCommand(rootfsPath, "rc-update", "add", "networking", "boot")
 		return
 	}
 
@@ -451,7 +452,7 @@ method=ignore
 			path := filepath.Join(nmDir, "eth0.nmconnection")
 			_ = os.WriteFile(path, []byte(keyfile), 0600)
 		}
-		_ = exec.Command("chroot", rootfsPath, "systemctl", "enable", "NetworkManager").Run()
+		_ = m.runRootfsCommand(rootfsPath, "systemctl", "enable", "NetworkManager")
 	}
 
 	networkdDir := filepath.Join(rootfsPath, "etc", "systemd", "network")
@@ -466,7 +467,7 @@ IPv6AcceptRA=no
 		_ = os.WriteFile(filepath.Join(networkdDir, "10-eth0.network"), []byte(network), 0644)
 	}
 	if !isRHELFamily {
-		_ = exec.Command("chroot", rootfsPath, "systemctl", "enable", "systemd-networkd").Run()
+		_ = m.runRootfsCommand(rootfsPath, "systemctl", "enable", "systemd-networkd")
 	}
 }
 
@@ -475,7 +476,10 @@ func (m *Manager) preconfigureSSH(rootfsPath, password, templateID string) error
 	_ = templateID
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	cmd := m.rootfsCommand(rootfsPath, "sh", "-c", sshSetupScript(password, false))
+	cmd, err := m.rootfsCommand(rootfsPath, "sh", "-c", sshSetupScript(password, false))
+	if err != nil {
+		return err
+	}
 	cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
@@ -1887,7 +1891,10 @@ func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 		if err := m.preconfigureSSH(rootfsPath, newPassword, c.Template); err != nil {
 			return "", fmt.Errorf("failed to configure SSH: %v", err)
 		}
-		cmd := m.rootfsCommand(rootfsPath, "sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(newPassword)))
+		cmd, err := m.rootfsCommand(rootfsPath, "sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(newPassword)))
+		if err != nil {
+			return "", err
+		}
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("failed to set password: %v, output: %s", err, string(output))
@@ -1899,22 +1906,70 @@ func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 	return newPassword, nil
 }
 
-func (m *Manager) rootfsCommand(rootfsPath string, args ...string) *exec.Cmd {
-	marker := filepath.Join(rootfsPath, ".clicd-unprivileged-shifted")
+func (m *Manager) rootfsCommand(rootfsPath string, args ...string) (*exec.Cmd, error) {
+	cleanRootfsPath, err := m.safeRootfsPath(rootfsPath)
+	if err != nil {
+		return nil, err
+	}
+
+	marker := filepath.Join(cleanRootfsPath, ".clicd-unprivileged-shifted")
 	if _, err := os.Stat(marker); err == nil {
 		uidBase, gidBase, mapErr := unprivilegedIDMap()
 		if mapErr == nil {
 			cmdArgs := []string{
 				"-m", fmt.Sprintf("u:0:%d:65536", uidBase),
 				"-m", fmt.Sprintf("g:0:%d:65536", gidBase),
-				"--", "chroot", rootfsPath,
+				"--", "chroot", "--", cleanRootfsPath,
 			}
 			cmdArgs = append(cmdArgs, args...)
-			return exec.Command("lxc-usernsexec", cmdArgs...)
+			return exec.Command("lxc-usernsexec", cmdArgs...), nil
 		}
 	}
-	cmdArgs := append([]string{rootfsPath}, args...)
-	return exec.Command("chroot", cmdArgs...)
+	cmdArgs := append([]string{"--", cleanRootfsPath}, args...)
+	return exec.Command("chroot", cmdArgs...), nil
+}
+
+func (m *Manager) runRootfsCommand(rootfsPath string, args ...string) error {
+	cmd, err := m.rootfsCommand(rootfsPath, args...)
+	if err != nil {
+		return err
+	}
+	return cmd.Run()
+}
+
+func (m *Manager) safeRootfsPath(rootfsPath string) (string, error) {
+	if rootfsPath == "" {
+		return "", fmt.Errorf("empty rootfs path")
+	}
+	if !filepath.IsAbs(rootfsPath) {
+		return "", fmt.Errorf("rootfs path must be absolute: %s", rootfsPath)
+	}
+
+	cleanRootfsPath := filepath.Clean(rootfsPath)
+	cleanLxcPath, err := filepath.Abs(m.LxcPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve LXC path: %v", err)
+	}
+	cleanLxcPath = filepath.Clean(cleanLxcPath)
+
+	if cleanRootfsPath == cleanLxcPath {
+		return "", fmt.Errorf("refusing LXC base path as rootfs: %s", cleanRootfsPath)
+	}
+	if filepath.Base(cleanRootfsPath) != "rootfs" {
+		return "", fmt.Errorf("refusing non-rootfs path: %s", cleanRootfsPath)
+	}
+	if filepath.Dir(cleanRootfsPath) == cleanLxcPath {
+		return "", fmt.Errorf("refusing rootfs directly under LXC path: %s", cleanRootfsPath)
+	}
+
+	rel, err := filepath.Rel(cleanLxcPath, cleanRootfsPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to validate rootfs path: %v", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("refusing unsafe rootfs path: %s", cleanRootfsPath)
+	}
+	return cleanRootfsPath, nil
 }
 
 func (m *Manager) cleanupContainerStorage(lxcName string) error {
@@ -2244,9 +2299,10 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	if err := m.shiftRootfsForUnprivileged(lxcName); err != nil {
 		return err
 	}
-	setCmd := m.rootfsCommand(rootfsPath,
-		"sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(c.SSHPassword)))
-	setCmd.Run()
+	if err := m.runRootfsCommand(rootfsPath,
+		"sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(c.SSHPassword))); err != nil {
+		fmt.Printf("Warning: failed to set root password in %s after reinstall: %v\n", lxcName, err)
+	}
 
 	// Update template and keep everything else the same
 	c.Template = templateID

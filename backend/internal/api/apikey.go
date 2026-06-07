@@ -2,10 +2,10 @@ package api
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"clicd/internal/config"
+
+	"golang.org/x/crypto/argon2"
 )
 
 type ApiKey struct {
@@ -79,14 +81,23 @@ func createApiKey(w http.ResponseWriter, r *http.Request) {
 
 	// Generate key: clicd_sk_ + 32 hex chars
 	rawBytes := make([]byte, 16)
-	rand.Read(rawBytes)
+	if _, err := rand.Read(rawBytes); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to generate API key"})
+		return
+	}
 	rawKey := "clicd_sk_" + hex.EncodeToString(rawBytes)
+
+	keyHash, err := hashAPIKey(rawKey)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to store API key"})
+		return
+	}
 
 	now := time.Now().Format("2006-01-02 15:04:05")
 	key := config.ApiKeyConfig{
 		ID:          generateShortID(),
 		Name:        req.Name,
-		KeyHash:     hashKey(rawKey),
+		KeyHash:     keyHash,
 		Prefix:      rawKey[:13] + "...",
 		IPWhitelist: strings.TrimSpace(req.IPWhitelist),
 		CreatedAt:   now,
@@ -114,10 +125,59 @@ func generateShortID() string {
 	return hex.EncodeToString(b)
 }
 
-// hashKey creates a simple hash for storage (not reversible)
-func hashKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
+const (
+	apiKeyHashPrefix     = "argon2id"
+	apiKeyHashTime       = uint32(3)
+	apiKeyHashMemory     = uint32(64 * 1024)
+	apiKeyHashThreads    = uint8(1)
+	apiKeyHashSaltLength = 16
+	apiKeyHashKeyLength  = uint32(32)
+)
+
+// hashAPIKey stores API keys using a salted slow password-hash style function.
+func hashAPIKey(key string) (string, error) {
+	salt := make([]byte, apiKeyHashSaltLength)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	return hashAPIKeyWithSalt(key, salt), nil
+}
+
+func hashAPIKeyWithSalt(key string, salt []byte) string {
+	digest := argon2.IDKey([]byte(key), salt, apiKeyHashTime, apiKeyHashMemory, apiKeyHashThreads, apiKeyHashKeyLength)
+	return fmt.Sprintf("%s$v=19$m=%d,t=%d,p=%d$%s$%s",
+		apiKeyHashPrefix,
+		apiKeyHashMemory,
+		apiKeyHashTime,
+		apiKeyHashThreads,
+		hex.EncodeToString(salt),
+		hex.EncodeToString(digest),
+	)
+}
+
+func verifyAPIKeyHash(rawKey, storedHash string) bool {
+	parts := strings.Split(storedHash, "$")
+	if len(parts) != 5 || parts[0] != apiKeyHashPrefix || parts[1] != "v=19" {
+		return false
+	}
+	var memory, iterations uint32
+	var threads uint8
+	if _, err := fmt.Sscanf(parts[2], "m=%d,t=%d,p=%d", &memory, &iterations, &threads); err != nil {
+		return false
+	}
+	if memory != apiKeyHashMemory || iterations != apiKeyHashTime || threads != apiKeyHashThreads {
+		return false
+	}
+	salt, err := hex.DecodeString(parts[3])
+	if err != nil || len(salt) == 0 {
+		return false
+	}
+	expected, err := hex.DecodeString(parts[4])
+	if err != nil || len(expected) == 0 {
+		return false
+	}
+	digest := argon2.IDKey([]byte(rawKey), salt, iterations, memory, threads, uint32(len(expected)))
+	return subtle.ConstantTimeCompare(digest, expected) == 1
 }
 
 func legacyHashKey(key string) string {
@@ -128,20 +188,36 @@ func legacyHashKey(key string) string {
 	return hex.EncodeToString(b)
 }
 
-// validateApiKey checks if the given key is valid and IP is allowed
-func validateApiKey(rawKey, clientIP string) bool {
-	hashed := hashKey(rawKey)
+func matchApiKey(rawKey string) (idx int, needsRehash bool) {
 	legacyHashed := legacyHashKey(rawKey)
-	for _, k := range config.AppConfig.ApiKeys {
-		if subtle.ConstantTimeCompare([]byte(k.KeyHash), []byte(hashed)) == 1 ||
-			subtle.ConstantTimeCompare([]byte(k.KeyHash), []byte(legacyHashed)) == 1 {
-			if k.IPWhitelist == "" {
-				return true
-			}
-			return isIPAllowed(clientIP, k.IPWhitelist)
+	for i, k := range config.AppConfig.ApiKeys {
+		if verifyAPIKeyHash(rawKey, k.KeyHash) {
+			return i, false
+		}
+		if subtle.ConstantTimeCompare([]byte(k.KeyHash), []byte(legacyHashed)) == 1 {
+			return i, true
 		}
 	}
-	return false
+	return -1, false
+}
+
+// validateApiKey checks if the given key is valid and IP is allowed.
+func validateApiKey(rawKey, clientIP string) bool {
+	idx, needsRehash := matchApiKey(rawKey)
+	if idx < 0 {
+		return false
+	}
+	k := config.AppConfig.ApiKeys[idx]
+	if k.IPWhitelist != "" && !isIPAllowed(clientIP, k.IPWhitelist) {
+		return false
+	}
+	if needsRehash {
+		if newHash, err := hashAPIKey(rawKey); err == nil {
+			config.AppConfig.ApiKeys[idx].KeyHash = newHash
+			config.SaveConfig()
+		}
+	}
+	return true
 }
 
 func apiKeyFromRequest(r *http.Request) string {
@@ -228,17 +304,14 @@ func ip4ToUint32(ip net.IP) uint32 {
 	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
 }
 
-// updateApiKeyLastUsed marks the key as recently used
+// updateApiKeyLastUsed marks the key as recently used.
 func updateApiKeyLastUsed(rawKey string) {
-	hashed := hashKey(rawKey)
-	now := time.Now().Format("2006-01-02 15:04:05")
-	for i := range config.AppConfig.ApiKeys {
-		if config.AppConfig.ApiKeys[i].KeyHash == hashed {
-			config.AppConfig.ApiKeys[i].LastUsed = now
-			config.SaveConfig()
-			return
-		}
+	idx, _ := matchApiKey(rawKey)
+	if idx < 0 {
+		return
 	}
+	config.AppConfig.ApiKeys[idx].LastUsed = time.Now().Format("2006-01-02 15:04:05")
+	config.SaveConfig()
 }
 
 // ApiKeyMiddleware authenticates requests via X-API-Key header or Authorization bearer.

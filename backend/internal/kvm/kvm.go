@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -738,10 +739,14 @@ func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 	if err := m.EnsureSSH(id); err != nil {
 		return "", err
 	}
+	chpasswdInput, err := chpasswdStdin("root", password)
+	if err != nil {
+		return "", err
+	}
 	client, err := ssh.Dial("tcp", net.JoinHostPort(c.IP, "22"), &ssh.ClientConfig{
 		User:            "root",
 		Auth:            []ssh.AuthMethod{ssh.Password(c.SSHPassword)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: kvmHostKeyCallback(c),
 		Timeout:         8 * time.Second,
 	})
 	if err != nil {
@@ -753,8 +758,8 @@ func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 		return "", err
 	}
 	defer session.Close()
-	cmd := fmt.Sprintf("printf 'root:%s\\n' | chpasswd", shellQuote(password))
-	if output, err := session.CombinedOutput(cmd); err != nil {
+	session.Stdin = bytes.NewReader(chpasswdInput)
+	if output, err := session.CombinedOutput("chpasswd"); err != nil {
 		return "", fmt.Errorf("failed to reset password: %v, output: %s", err, string(output))
 	}
 	c.SSHPassword = password
@@ -2224,7 +2229,7 @@ func (m *Manager) EnsureSSH(id int) error {
 		client, err := ssh.Dial("tcp", net.JoinHostPort(c.IP, "22"), &ssh.ClientConfig{
 			User:            "root",
 			Auth:            []ssh.AuthMethod{ssh.Password(c.SSHPassword)},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback: kvmHostKeyCallback(c),
 			Timeout:         8 * time.Second,
 		})
 		if err != nil {
@@ -3190,7 +3195,7 @@ func (m *Manager) applyGuestIPv6OverSSH(c *config.Container) error {
 	client, err := ssh.Dial("tcp", net.JoinHostPort(c.IP, "22"), &ssh.ClientConfig{
 		User:            "root",
 		Auth:            []ssh.AuthMethod{ssh.Password(c.SSHPassword)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: kvmHostKeyCallback(c),
 		Timeout:         8 * time.Second,
 	})
 	if err != nil {
@@ -3375,6 +3380,46 @@ func secureRandomInt(max int) int {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func chpasswdStdin(username, password string) ([]byte, error) {
+	if username == "" || strings.ContainsAny(username, ":\n\r") {
+		return nil, fmt.Errorf("invalid chpasswd username")
+	}
+	if strings.ContainsAny(password, "\n\r") {
+		return nil, fmt.Errorf("password cannot contain newlines")
+	}
+	return []byte(username + ":" + password + "\n"), nil
+}
+
+func kvmHostKeyCallback(c *config.Container) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		return verifyKVMHostKey(c, key, config.SaveConfig)
+	}
+}
+
+func verifyKVMHostKey(c *config.Container, key ssh.PublicKey, save func() error) error {
+	if c == nil {
+		return fmt.Errorf("KVM container is nil")
+	}
+	fingerprint := sshHostKeyFingerprint(key)
+	if c.SSHHostKey != "" && c.SSHHostKey != fingerprint {
+		return fmt.Errorf("KVM SSH host key mismatch")
+	}
+	if c.SSHHostKey == "" {
+		c.SSHHostKey = fingerprint
+		if save != nil {
+			if err := save(); err != nil {
+				return fmt.Errorf("failed to save KVM SSH host key: %v", err)
+			}
+		}
+	}
+	return nil
+}
+
+func sshHostKeyFingerprint(key ssh.PublicKey) string {
+	sum := sha256.Sum256(key.Marshal())
+	return hex.EncodeToString(sum[:])
 }
 
 func allocateDefaultEqualPorts(c *config.Container, count int) []int {
