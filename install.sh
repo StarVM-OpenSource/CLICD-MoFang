@@ -8,6 +8,7 @@ ACTION="${1:-install}"
 ACTION_CONFIRM="${2:-}"
 ISSUE_URL="https://github.com/${REPO}/issues"
 LOG_FILE="${CLICD_LOG_FILE:-/var/log/clicd-install.log}"
+INSTALL_DOWNLOAD_MARKER="${CLICD_INSTALL_DOWNLOAD_MARKER:-/tmp/clicd-install-dir.$$}"
 
 echo "====================================="
 echo "  CLICD 中文安装/卸载脚本"
@@ -828,6 +829,59 @@ try_enable_project_quota() {
     log "ext4 project quota 未启用，CLICD 将自动回退到 loopback 镜像磁盘限制模式。"
 }
 
+download_file() {
+    url="$1"
+    dest="$2"
+    rm -f "$dest"
+
+    if has_cmd curl; then
+        curl -fL --retry 6 --retry-delay 2 --connect-timeout 20 --max-time 600 "$url" -o "$dest"
+        return
+    fi
+    if has_cmd wget; then
+        wget --tries=6 --timeout=30 --waitretry=2 -O "$dest" "$url"
+        return
+    fi
+    return 127
+}
+
+release_api_json() {
+    api_url="https://api.github.com/repos/${REPO}/releases/latest"
+
+    if has_cmd curl; then
+        curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 120 "$api_url" 2>/dev/null || true
+        return
+    fi
+    if has_cmd wget; then
+        wget -qO- --tries=3 --timeout=30 "$api_url" 2>/dev/null || true
+        return
+    fi
+}
+
+release_asset_url() {
+    asset_name="$1"
+
+    if [ "$CLICD_INSTALL_VERSION" != "latest" ]; then
+        printf '%s\n' "https://github.com/${REPO}/releases/download/${CLICD_INSTALL_VERSION}/${asset_name}"
+        return
+    fi
+
+    api_data="$(release_api_json)"
+    url="$(printf '%s\n' "$api_data" | sed -n 's/.*"browser_download_url": *"\([^"]*\/'"$asset_name"'\)".*/\1/p' | head -n 1)"
+    if [ -n "$url" ]; then
+        printf '%s\n' "$url"
+        return
+    fi
+
+    tag="$(printf '%s\n' "$api_data" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
+    if [ -n "$tag" ]; then
+        printf '%s\n' "https://github.com/${REPO}/releases/download/${tag}/${asset_name}"
+        return
+    fi
+
+    printf '%s\n' "https://github.com/${REPO}/releases/latest/download/${asset_name}"
+}
+
 download_release_if_needed() {
     if [ -f "./clicd" ]; then
         return
@@ -843,22 +897,66 @@ download_release_if_needed() {
     log "正在下载发行版包：${download_url}"
 
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' 0
+    rm -f "$INSTALL_DOWNLOAD_MARKER"
+    printf '%s\n' "$tmp_dir" > "$INSTALL_DOWNLOAD_MARKER" || die "Failed to write install temp marker."
 
-    if has_cmd curl; then
-        curl -fL --retry 6 --retry-delay 2 --connect-timeout 20 --max-time 600 "$download_url" -o "$tmp_dir/$ASSET" ||
-            die "Release package download failed: $download_url"
-    elif has_cmd wget; then
-        wget --tries=6 --timeout=30 --waitretry=2 -O "$tmp_dir/$ASSET" "$download_url" ||
-            die "Release package download failed: $download_url"
-    else
+    if ! has_cmd curl && ! has_cmd wget; then
         die "下载发行版包需要 curl 或 wget。"
     fi
 
-    [ -s "$tmp_dir/$ASSET" ] || die "Release package is empty: $download_url"
-    tar -xzf "$tmp_dir/$ASSET" -C "$tmp_dir" || die "Failed to extract release package: $tmp_dir/$ASSET"
-    cd "$tmp_dir/clicd-linux-amd64" || die "Release package layout is invalid: missing clicd-linux-amd64 directory"
-    [ -f "./clicd" ] || die "下载的发行版包中未找到 clicd 二进制。"
+    archive_path="$tmp_dir/$ASSET"
+    archive_urls="$download_url"
+    resolved_archive_url="$(release_asset_url "$ASSET")"
+    if [ "$resolved_archive_url" != "$download_url" ]; then
+        archive_urls="$archive_urls $resolved_archive_url"
+    fi
+
+    archive_ok=0
+    for url in $archive_urls; do
+        [ -n "$url" ] || continue
+        log "Trying release archive: $url"
+        if download_file "$url" "$archive_path" && [ -s "$archive_path" ]; then
+            archive_ok=1
+            break
+        fi
+        warn "Release archive download failed, trying next source: $url"
+    done
+
+    if [ "$archive_ok" = "1" ]; then
+        tar -xzf "$archive_path" -C "$tmp_dir" || die "Failed to extract release package: $archive_path"
+    else
+        binary_asset="clicd-linux-amd64"
+        if [ "$CLICD_INSTALL_VERSION" = "latest" ]; then
+            binary_url="https://github.com/${REPO}/releases/latest/download/${binary_asset}"
+        else
+            binary_url="https://github.com/${REPO}/releases/download/${CLICD_INSTALL_VERSION}/${binary_asset}"
+        fi
+        binary_urls="$binary_url"
+        resolved_binary_url="$(release_asset_url "$binary_asset")"
+        if [ "$resolved_binary_url" != "$binary_url" ]; then
+            binary_urls="$binary_urls $resolved_binary_url"
+        fi
+
+        binary_path="$tmp_dir/$binary_asset"
+        binary_ok=0
+        for url in $binary_urls; do
+            [ -n "$url" ] || continue
+            log "Trying release binary: $url"
+            if download_file "$url" "$binary_path" && [ -s "$binary_path" ]; then
+                mkdir -p "$tmp_dir/clicd-linux-amd64"
+                cp "$binary_path" "$tmp_dir/clicd-linux-amd64/clicd"
+                chmod +x "$tmp_dir/clicd-linux-amd64/clicd"
+                binary_ok=1
+                break
+            fi
+            warn "Release binary download failed, trying next source: $url"
+        done
+
+        [ "$binary_ok" = "1" ] || die "Release package download failed: $download_url"
+    fi
+
+    [ -d "$tmp_dir/clicd-linux-amd64" ] || die "Release package layout is invalid: missing clicd-linux-amd64 directory"
+    [ -f "$tmp_dir/clicd-linux-amd64/clicd" ] || die "下载的发行版包中未找到 clicd 二进制。"
 }
 
 install_binary() {
@@ -869,12 +967,31 @@ install_binary() {
         rc-service clicd stop >/dev/null 2>&1 || true
     fi
 
+    bin_src="./clicd"
+    download_dir=""
+    if [ ! -f "$bin_src" ] && [ -f "$INSTALL_DOWNLOAD_MARKER" ]; then
+        download_dir="$(sed -n '1p' "$INSTALL_DOWNLOAD_MARKER" 2>/dev/null || true)"
+        if [ -n "$download_dir" ] && [ -f "$download_dir/clicd-linux-amd64/clicd" ]; then
+            bin_src="$download_dir/clicd-linux-amd64/clicd"
+        fi
+    fi
+    [ -f "$bin_src" ] || die "未找到 clicd 二进制，安装无法继续。"
+
     tmp_bin="/usr/local/bin/clicd.new.$$"
-    cp ./clicd "$tmp_bin"
+    cp "$bin_src" "$tmp_bin"
     chmod +x "$tmp_bin"
     mv -f "$tmp_bin" /usr/local/bin/clicd
     chmod +x /usr/local/bin/clicd
     log "已安装二进制：/usr/local/bin/clicd"
+
+    if [ -n "$download_dir" ]; then
+        case "$download_dir" in
+            /tmp/*)
+                rm -rf "$download_dir"
+                ;;
+        esac
+        rm -f "$INSTALL_DOWNLOAD_MARKER"
+    fi
 }
 
 install_systemd_service() {
