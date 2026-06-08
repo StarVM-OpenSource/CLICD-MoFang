@@ -36,6 +36,9 @@ func HandleVNCTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !requireScope(w, r, "terminal:vnc") {
+		return
+	}
 	var req struct {
 		ContainerName string `json:"container_name"`
 	}
@@ -158,6 +161,16 @@ func HandleVNCProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func vncRequesterIdentity(r *http.Request) (string, bool) {
+	if ctx, ok := authContextFromRequest(r); ok {
+		switch ctx.Type {
+		case authTypeSubUser:
+			return ctx.Username, true
+		case authTypeAPIKey:
+			return ctx.Actor, false
+		case authTypeAdmin:
+			return ctx.Username, false
+		}
+	}
 	claims, ok := claimsFromRequest(r)
 	if !ok {
 		return "api-key", false

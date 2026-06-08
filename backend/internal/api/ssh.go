@@ -42,6 +42,9 @@ func HandleWebSSHTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !requireScope(w, r, "terminal:ssh") {
+		return
+	}
 	var req struct {
 		ContainerName string `json:"container_name"`
 	}

@@ -23,7 +23,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 
 		if r.Method == http.MethodOptions {
@@ -112,6 +112,47 @@ func setupRoutes(mux *http.ServeMux) {
 	// API Key management
 	mux.HandleFunc("/api/api-keys", corsMiddleware(api.AdminMiddleware(api.HandleApiKeys)))
 	mux.HandleFunc("/api/api-keys/", corsMiddleware(api.AdminMiddleware(api.HandleApiKeyDelete)))
+
+	// Versioned external API routes
+	mux.HandleFunc("/api/v1/dashboard", corsMiddleware(api.AuthMiddleware(api.HandleDashboard)))
+	mux.HandleFunc("/api/v1/containers", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainers))))
+	mux.HandleFunc("/api/v1/containers/", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleSingleContainer))))
+	mux.HandleFunc("/api/v1/templates", corsMiddleware(api.AuthMiddleware(api.HandleTemplates)))
+	mux.HandleFunc("/api/v1/images", corsMiddleware(api.AuthMiddleware(api.HandleImages)))
+	mux.HandleFunc("/api/v1/images/download", corsMiddleware(api.AuthMiddleware(api.HandleImageDownload)))
+	mux.HandleFunc("/api/v1/images/cancel", corsMiddleware(api.AuthMiddleware(api.HandleImageCancel)))
+	mux.HandleFunc("/api/v1/images/delete", corsMiddleware(api.AuthMiddleware(api.HandleImageDelete)))
+	mux.HandleFunc("/api/v1/images/toggle", corsMiddleware(api.AuthMiddleware(api.HandleImageToggle)))
+	mux.HandleFunc("/api/v1/images/enabled", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleEnabledImages))))
+	mux.HandleFunc("/api/v1/host-info", corsMiddleware(api.AuthMiddleware(api.HandleHostInfo)))
+	mux.HandleFunc("/api/v1/snapshots", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("snapshot:read", api.HandleSnapshots))))
+	mux.HandleFunc("/api/v1/routing", corsMiddleware(api.AuthMiddleware(api.HandleRouting)))
+	mux.HandleFunc("/api/v1/ipv6/status", corsMiddleware(api.AuthMiddleware(api.HandleIPv6Status)))
+	mux.HandleFunc("/api/v1/tasks", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleTasks))))
+	mux.HandleFunc("/api/v1/tasks/", corsMiddleware(api.AuthMiddleware(api.HandleTaskDelete)))
+	mux.HandleFunc("/api/v1/batch-create", corsMiddleware(api.AuthMiddleware(api.HandleBatchCreate)))
+	mux.HandleFunc("/api/v1/batch-action", corsMiddleware(api.AuthMiddleware(api.HandleBatchAction)))
+	mux.HandleFunc("/api/v1/sub-user/create", corsMiddleware(api.AuthMiddleware(api.HandleSubUserCreate)))
+	mux.HandleFunc("/api/v1/sub-users", corsMiddleware(api.AuthMiddleware(api.HandleSubUserList)))
+	mux.HandleFunc("/api/v1/sub-users/", corsMiddleware(api.AuthMiddleware(api.HandleSubUserAction)))
+	mux.HandleFunc("/api/v1/audit-logs", corsMiddleware(api.AuthMiddleware(api.HandleAuditLogs)))
+	mux.HandleFunc("/api/v1/login-logs", corsMiddleware(api.AuthMiddleware(api.HandleLoginLogs)))
+	mux.HandleFunc("/api/v1/security/alerts", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleSecurityAlerts))))
+	mux.HandleFunc("/api/v1/security/check", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:check", api.HandleSecurityCheck))))
+	mux.HandleFunc("/api/v1/security/logs", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleSecurityLogs))))
+	mux.HandleFunc("/api/v1/security/summary", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleContainerSecuritySummary))))
+	mux.HandleFunc("/api/v1/security/settings", corsMiddleware(api.AuthMiddleware(api.HandleSecuritySettings)))
+	mux.HandleFunc("/api/v1/ssh-ticket", corsMiddleware(api.AuthMiddleware(api.HandleWebSSHTicket)))
+	mux.HandleFunc("/api/v1/vnc-ticket", corsMiddleware(api.AuthMiddleware(api.HandleVNCTicket)))
+	mux.HandleFunc("/api/v1/api-keys", corsMiddleware(api.AuthMiddleware(api.HandleApiKeys)))
+	mux.HandleFunc("/api/v1/api-keys/", corsMiddleware(api.AuthMiddleware(api.HandleApiKeyDelete)))
+	mux.HandleFunc("/api/v1/swap", corsMiddleware(api.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			api.HandleSwapInfo(w, r)
+			return
+		}
+		api.HandleSwapManage(w, r)
+	})))
 
 	// Version (public)
 	mux.HandleFunc("/api/version", corsMiddleware(api.HandleVersion))

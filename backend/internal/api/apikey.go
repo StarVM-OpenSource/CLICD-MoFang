@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,64 +17,98 @@ import (
 )
 
 type ApiKey struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Key         string `json:"key,omitempty"`
-	Prefix      string `json:"prefix"`
-	IPWhitelist string `json:"ip_whitelist"`
-	CreatedAt   string `json:"created_at"`
-	LastUsed    string `json:"last_used"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Key            string   `json:"key,omitempty"`
+	Prefix         string   `json:"prefix"`
+	IPWhitelist    string   `json:"ip_whitelist"`
+	CreatedAt      string   `json:"created_at"`
+	LastUsed       string   `json:"last_used"`
+	Scopes         []string `json:"scopes,omitempty"`
+	ExpiresAt      string   `json:"expires_at,omitempty"`
+	Disabled       bool     `json:"disabled,omitempty"`
+	ContainerUUIDs []string `json:"container_uuids,omitempty"`
+	LastUsedIP     string   `json:"last_used_ip,omitempty"`
+}
+
+type apiKeyRequest struct {
+	Name           string   `json:"name"`
+	IPWhitelist    string   `json:"ip_whitelist"`
+	Scopes         []string `json:"scopes"`
+	ExpiresAt      string   `json:"expires_at"`
+	Disabled       bool     `json:"disabled"`
+	ContainerUUIDs []string `json:"container_uuids"`
+}
+
+var defaultApiKeyScopes = []string{
+	"dashboard:read",
+	"container:read",
+	"task:read",
+	"image:read",
+	"snapshot:read",
+	"routing:read",
+	"ipv6:read",
+	"host:read",
 }
 
 // HandleApiKeys handles GET (list) and POST (create) for API keys
 func HandleApiKeys(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireScope(w, r, "apikey:read") {
+			return
+		}
 		listApiKeys(w, r)
 	case http.MethodPost:
+		if !requireScope(w, r, "apikey:create") {
+			return
+		}
 		createApiKey(w, r)
 	default:
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 	}
 }
 
-// HandleApiKeyDelete handles DELETE for a specific API key
+// HandleApiKeyDelete handles PATCH and DELETE for a specific API key
 func HandleApiKeyDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
+	switch r.Method {
+	case http.MethodPatch:
+		if !requireScope(w, r, "apikey:update") {
+			return
+		}
+		updateApiKey(w, r)
+	case http.MethodDelete:
+		if !requireScope(w, r, "apikey:delete") {
+			return
+		}
+		deleteApiKey(w, r)
+	default:
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
-		return
 	}
-	keyID := strings.TrimPrefix(r.URL.Path, "/api/api-keys/")
-	if keyID == "" {
-		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Key ID required"})
-		return
-	}
-	config.DeleteApiKey(keyID)
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "API key deleted"})
+}
+
+func apiKeyIDFromPath(path string) string {
+	path = strings.TrimPrefix(path, "/api/api-keys/")
+	path = strings.TrimPrefix(path, "/api/v1/api-keys/")
+	return strings.Trim(path, "/")
 }
 
 func listApiKeys(w http.ResponseWriter, r *http.Request) {
 	keys := make([]ApiKey, 0)
 	for _, k := range config.AppConfig.ApiKeys {
-		keys = append(keys, ApiKey{
-			ID:          k.ID,
-			Name:        k.Name,
-			Prefix:      k.Prefix,
-			IPWhitelist: k.IPWhitelist,
-			CreatedAt:   k.CreatedAt,
-			LastUsed:    k.LastUsed,
-		})
+		keys = append(keys, apiKeyResponse(k))
 	}
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: keys})
 }
 
 func createApiKey(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name        string `json:"name"`
-		IPWhitelist string `json:"ip_whitelist"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+	var req apiKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Name is required"})
+		return
+	}
+	if req.ExpiresAt != "" && !validApiKeyTime(req.ExpiresAt) {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid expiration date"})
 		return
 	}
 
@@ -94,29 +127,107 @@ func createApiKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().Format("2006-01-02 15:04:05")
+	scopes := normalizeRequestedScopes(req.Scopes, defaultApiKeyScopes)
 	key := config.ApiKeyConfig{
-		ID:          generateShortID(),
-		Name:        req.Name,
-		KeyHash:     keyHash,
-		Prefix:      rawKey[:13] + "...",
-		IPWhitelist: strings.TrimSpace(req.IPWhitelist),
-		CreatedAt:   now,
+		ID:             generateShortID(),
+		Name:           strings.TrimSpace(req.Name),
+		KeyHash:        keyHash,
+		Prefix:         rawKey[:13] + "...",
+		IPWhitelist:    strings.TrimSpace(req.IPWhitelist),
+		CreatedAt:      now,
+		Scopes:         scopes,
+		ExpiresAt:      strings.TrimSpace(req.ExpiresAt),
+		Disabled:       req.Disabled,
+		ContainerUUIDs: normalizeStringSlice(req.ContainerUUIDs),
 	}
 	config.AppConfig.ApiKeys = append(config.AppConfig.ApiKeys, key)
-	config.SaveConfig()
+	if err := config.SaveConfig(); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save API key"})
+		return
+	}
+	auditRequest(r, "apikey.create", key.Name, "scopes="+strings.Join(key.Scopes, ","), true, "")
 
+	resp := apiKeyResponse(key)
+	resp.Key = rawKey
 	jsonResponse(w, http.StatusCreated, APIResponse{
 		Success: true,
 		Message: "API key created. Save this key now - it won't be shown again.",
-		Data: ApiKey{
-			ID:          key.ID,
-			Name:        key.Name,
-			Key:         rawKey,
-			Prefix:      key.Prefix,
-			IPWhitelist: key.IPWhitelist,
-			CreatedAt:   key.CreatedAt,
-		},
+		Data:    resp,
 	})
+}
+
+func updateApiKey(w http.ResponseWriter, r *http.Request) {
+	keyID := apiKeyIDFromPath(r.URL.Path)
+	if keyID == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Key ID required"})
+		return
+	}
+	var req apiKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	if req.ExpiresAt != "" && !validApiKeyTime(req.ExpiresAt) {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid expiration date"})
+		return
+	}
+	for i := range config.AppConfig.ApiKeys {
+		if config.AppConfig.ApiKeys[i].ID != keyID {
+			continue
+		}
+		if strings.TrimSpace(req.Name) != "" {
+			config.AppConfig.ApiKeys[i].Name = strings.TrimSpace(req.Name)
+		}
+		config.AppConfig.ApiKeys[i].IPWhitelist = strings.TrimSpace(req.IPWhitelist)
+		if len(req.Scopes) > 0 {
+			config.AppConfig.ApiKeys[i].Scopes = normalizeStringSlice(req.Scopes)
+		}
+		config.AppConfig.ApiKeys[i].ExpiresAt = strings.TrimSpace(req.ExpiresAt)
+		config.AppConfig.ApiKeys[i].Disabled = req.Disabled
+		config.AppConfig.ApiKeys[i].ContainerUUIDs = normalizeStringSlice(req.ContainerUUIDs)
+		if err := config.SaveConfig(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save API key"})
+			return
+		}
+		auditRequest(r, "apikey.update", config.AppConfig.ApiKeys[i].Name, "scopes="+strings.Join(config.AppConfig.ApiKeys[i].Scopes, ","), true, "")
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: apiKeyResponse(config.AppConfig.ApiKeys[i])})
+		return
+	}
+	jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "API key not found"})
+}
+
+func deleteApiKey(w http.ResponseWriter, r *http.Request) {
+	keyID := apiKeyIDFromPath(r.URL.Path)
+	if keyID == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Key ID required"})
+		return
+	}
+	name := keyID
+	for _, k := range config.AppConfig.ApiKeys {
+		if k.ID == keyID {
+			name = k.Name
+			break
+		}
+	}
+	config.DeleteApiKey(keyID)
+	auditRequest(r, "apikey.delete", name, "", true, "")
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "API key deleted"})
+}
+
+func apiKeyResponse(k config.ApiKeyConfig) ApiKey {
+	return ApiKey{
+		ID:             k.ID,
+		Name:           k.Name,
+		Prefix:         k.Prefix,
+		IPWhitelist:    k.IPWhitelist,
+		CreatedAt:      k.CreatedAt,
+		LastUsed:       k.LastUsed,
+		Scopes:         normalizeApiKeyScopes(k.Scopes),
+		ExpiresAt:      k.ExpiresAt,
+		Disabled:       k.Disabled,
+		ContainerUUIDs: k.ContainerUUIDs,
+		LastUsedIP:     k.LastUsedIP,
+	}
 }
 
 func generateShortID() string {
@@ -203,13 +314,21 @@ func matchApiKey(rawKey string) (idx int, needsRehash bool) {
 
 // validateApiKey checks if the given key is valid and IP is allowed.
 func validateApiKey(rawKey, clientIP string) bool {
+	_, ok := validateApiKeyDetails(rawKey, clientIP)
+	return ok
+}
+
+func validateApiKeyDetails(rawKey, clientIP string) (*config.ApiKeyConfig, bool) {
 	idx, needsRehash := matchApiKey(rawKey)
 	if idx < 0 {
-		return false
+		return nil, false
 	}
-	k := config.AppConfig.ApiKeys[idx]
-	if k.IPWhitelist != "" && !isIPAllowed(clientIP, k.IPWhitelist) {
-		return false
+	k := &config.AppConfig.ApiKeys[idx]
+	if k.Disabled || apiKeyExpired(k.ExpiresAt) {
+		return nil, false
+	}
+	if clientIP != "" && k.IPWhitelist != "" && !isIPAllowed(clientIP, k.IPWhitelist) {
+		return nil, false
 	}
 	if needsRehash {
 		if newHash, err := hashAPIKey(rawKey); err == nil {
@@ -217,7 +336,38 @@ func validateApiKey(rawKey, clientIP string) bool {
 			config.SaveConfig()
 		}
 	}
-	return true
+	if len(k.Scopes) == 0 {
+		k.Scopes = []string{"*"}
+	}
+	return k, true
+}
+
+func validateApiKeyRequest(r *http.Request) (*config.ApiKeyConfig, bool) {
+	apiKey := apiKeyFromRequest(r)
+	if apiKey == "" {
+		return nil, false
+	}
+	key, ok := validateApiKeyDetails(apiKey, clientIP(r))
+	if !ok {
+		return nil, false
+	}
+	updateApiKeyLastUsedForKey(key, clientIP(r))
+	return key, true
+}
+
+func authContextFromAPIKey(key *config.ApiKeyConfig) AuthContext {
+	actor := "api:" + key.ID
+	if key.Name != "" {
+		actor = "api:" + key.Name
+	}
+	return AuthContext{
+		Type:           authTypeAPIKey,
+		ApiKeyID:       key.ID,
+		ApiKeyName:     key.Name,
+		Actor:          actor,
+		Scopes:         normalizeApiKeyScopes(key.Scopes),
+		ContainerUUIDs: key.ContainerUUIDs,
+	}
 }
 
 func apiKeyFromRequest(r *http.Request) string {
@@ -232,23 +382,16 @@ func apiKeyFromRequest(r *http.Request) string {
 }
 
 func isValidApiKeyRequest(r *http.Request) bool {
-	apiKey := apiKeyFromRequest(r)
-	if apiKey == "" {
-		return false
-	}
-	if !validateApiKey(apiKey, clientIP(r)) {
-		return false
-	}
-	updateApiKeyLastUsed(apiKey)
-	return true
+	_, ok := validateApiKeyRequest(r)
+	return ok
 }
 
 // isIPAllowed checks if clientIP matches any entry in the whitelist
 func isIPAllowed(clientIP, whitelist string) bool {
-	clientIP = strings.TrimSpace(clientIP)
-	// Strip port if present
-	if idx := strings.LastIndex(clientIP, ":"); idx > strings.LastIndex(clientIP, "]") {
-		clientIP = clientIP[:idx]
+	clientIP = normalizeIPString(clientIP)
+	client := net.ParseIP(clientIP)
+	if client == nil {
+		return false
 	}
 	for _, entry := range strings.Split(whitelist, "\n") {
 		entry = strings.TrimSpace(entry)
@@ -256,74 +399,97 @@ func isIPAllowed(clientIP, whitelist string) bool {
 			continue
 		}
 		if strings.Contains(entry, "/") {
-			// CIDR match
-			if ipInCIDR(clientIP, entry) {
+			_, network, err := net.ParseCIDR(entry)
+			if err == nil && network.Contains(client) {
 				return true
 			}
-		} else if entry == clientIP {
+			continue
+		}
+		if allowed := net.ParseIP(normalizeIPString(entry)); allowed != nil && allowed.Equal(client) {
 			return true
 		}
 	}
 	return false
 }
 
-func ipInCIDR(ipStr, cidr string) bool {
-	parts := strings.Split(cidr, "/")
-	if len(parts) != 2 {
-		return false
-	}
-	// Simple prefix match for IPv4
-	ip := netParseIP(ipStr)
-	cidrIP := netParseIP(parts[0])
-	if ip == nil || cidrIP == nil {
-		return false
-	}
-	bits, err := strconv.Atoi(parts[1])
-	if err != nil || bits < 0 || bits > 32 {
-		return false
-	}
-	mask := uint32(0xFFFFFFFF) << (32 - bits)
-	ipVal := ip4ToUint32(ip)
-	cidrVal := ip4ToUint32(cidrIP)
-	return (ipVal & mask) == (cidrVal & mask)
-}
-
-func netParseIP(s string) net.IP {
+func normalizeIPString(s string) string {
 	s = strings.TrimSpace(s)
-	if idx := strings.LastIndex(s, ":"); idx > strings.LastIndex(s, "]") {
-		s = s[:idx]
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return strings.Trim(host, "[]")
 	}
-	return net.ParseIP(s)
+	return strings.Trim(s, "[]")
 }
 
-func ip4ToUint32(ip net.IP) uint32 {
-	ip = ip.To4()
-	if ip == nil {
-		return 0
-	}
-	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+func ipInCIDR(ipStr, cidr string) bool {
+	ip := net.ParseIP(normalizeIPString(ipStr))
+	_, network, err := net.ParseCIDR(cidr)
+	return err == nil && ip != nil && network.Contains(ip)
 }
 
 // updateApiKeyLastUsed marks the key as recently used.
 func updateApiKeyLastUsed(rawKey string) {
-	idx, _ := matchApiKey(rawKey)
-	if idx < 0 {
+	key, ok := validateApiKeyDetails(rawKey, "")
+	if !ok {
 		return
 	}
-	config.AppConfig.ApiKeys[idx].LastUsed = time.Now().Format("2006-01-02 15:04:05")
+	updateApiKeyLastUsedForKey(key, "")
+}
+
+func updateApiKeyLastUsedForKey(key *config.ApiKeyConfig, ip string) {
+	key.LastUsed = time.Now().Format("2006-01-02 15:04:05")
+	if ip != "" {
+		key.LastUsedIP = ip
+	}
 	config.SaveConfig()
 }
 
 // ApiKeyMiddleware authenticates requests via X-API-Key header or Authorization bearer.
 func ApiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		apiKey := apiKeyFromRequest(r)
-		if apiKey == "" || !validateApiKey(apiKey, clientIP(r)) {
+		key, ok := validateApiKeyRequest(r)
+		if !ok {
 			jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid API key or IP not in whitelist"})
 			return
 		}
-
-		updateApiKeyLastUsed(apiKey)
-		next(w, r)
+		next(w, withAuthContext(r, authContextFromAPIKey(key)))
 	}
+}
+
+func normalizeApiKeyScopes(scopes []string) []string {
+	return normalizeRequestedScopes(scopes, []string{"*"})
+}
+
+func normalizeRequestedScopes(scopes []string, fallback []string) []string {
+	result := normalizeStringSlice(scopes)
+	if len(result) == 0 {
+		return append([]string(nil), fallback...)
+	}
+	return result
+}
+
+func normalizeStringSlice(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func validApiKeyTime(value string) bool {
+	_, err := time.ParseInLocation("2006-01-02 15:04:05", value, time.Local)
+	return err == nil
+}
+
+func apiKeyExpired(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	expiresAt, err := time.ParseInLocation("2006-01-02 15:04:05", value, time.Local)
+	return err == nil && !time.Now().Before(expiresAt)
 }

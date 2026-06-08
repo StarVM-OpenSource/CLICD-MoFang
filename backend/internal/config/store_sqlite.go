@@ -57,6 +57,28 @@ func encodeSavedTaskConfig(cfg savedTaskConfig) string {
 	return string(data)
 }
 
+func encodeStringSlice(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func decodeStringSlice(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil
+	}
+	return values
+}
+
 func getDBPath() string {
 	cfgPath := getConfigPath()
 	ext := filepath.Ext(cfgPath)
@@ -185,7 +207,12 @@ func ensureSchema() error {
 			prefix TEXT,
 			ip_whitelist TEXT,
 			created_at TEXT,
-			last_used TEXT
+			last_used TEXT,
+			scopes TEXT,
+			expires_at TEXT,
+			disabled INTEGER,
+			container_uuids TEXT,
+			last_used_ip TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +237,8 @@ func ensureSchema() error {
 			created_at TEXT,
 			template_id TEXT,
 			user TEXT,
+			ip TEXT,
+			user_agent TEXT,
 			cfg_name TEXT,
 			cfg_virtualization TEXT,
 			cfg_template_id TEXT,
@@ -263,7 +292,53 @@ func ensureSchema() error {
 			return fmt.Errorf("failed to create sqlite schema: %v", err)
 		}
 	}
+	return ensureSchemaMigrations()
+}
+
+func ensureSchemaMigrations() error {
+	for _, column := range []struct {
+		table string
+		name  string
+		def   string
+	}{
+		{"api_keys", "scopes", "TEXT"},
+		{"api_keys", "expires_at", "TEXT"},
+		{"api_keys", "disabled", "INTEGER"},
+		{"api_keys", "container_uuids", "TEXT"},
+		{"api_keys", "last_used_ip", "TEXT"},
+		{"tasks", "ip", "TEXT"},
+		{"tasks", "user_agent", "TEXT"},
+	} {
+		if err := ensureColumn(column.table, column.name, column.def); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func ensureColumn(table, name, def string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, pk int
+		var defaultValue interface{}
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if columnName == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + def)
+	return err
 }
 
 func loadConfigFromDB() (*ClicdConfig, bool, error) {
@@ -468,8 +543,10 @@ func saveSubUsers(tx *sql.Tx) error {
 
 func saveAPIKeys(tx *sql.Tx) error {
 	for _, k := range AppConfig.ApiKeys {
-		if _, err := tx.Exec(`INSERT INTO api_keys(id, name, key_hash, prefix, ip_whitelist, created_at, last_used)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`, k.ID, k.Name, k.KeyHash, k.Prefix, k.IPWhitelist, k.CreatedAt, k.LastUsed); err != nil {
+		scopes := encodeStringSlice(k.Scopes)
+		containerUUIDs := encodeStringSlice(k.ContainerUUIDs)
+		if _, err := tx.Exec(`INSERT INTO api_keys(id, name, key_hash, prefix, ip_whitelist, created_at, last_used, scopes, expires_at, disabled, container_uuids, last_used_ip)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, k.ID, k.Name, k.KeyHash, k.Prefix, k.IPWhitelist, k.CreatedAt, k.LastUsed, scopes, k.ExpiresAt, boolInt(k.Disabled), containerUUIDs, k.LastUsedIP); err != nil {
 			return err
 		}
 	}
@@ -498,13 +575,13 @@ func saveTasksDB(tx *sql.Tx) error {
 	for _, task := range AppConfig.Tasks {
 		cfg := parseSavedTaskConfig(task.Config)
 		if _, err := tx.Exec(`INSERT INTO tasks(
-			id, type, container_id, container_name, status, error, created_at, template_id, user,
+			id, type, container_id, container_name, status, error, created_at, template_id, user, ip, user_agent,
 			cfg_name, cfg_virtualization, cfg_template_id, cfg_vcpu, cfg_cpu_percent, cfg_ram_mb, cfg_disk_gb,
 			cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
 			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_snapshot_limit,
 			cfg_assign_ipv6, cfg_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
 			cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
 			cfg.NetworkBWMbps, cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
 			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.PortMappingCount, cfg.SnapshotLimit,
@@ -669,7 +746,7 @@ func loadStringList(table, valueColumn, keyColumn, key string) ([]string, error)
 }
 
 func loadAPIKeys() ([]ApiKeyConfig, error) {
-	rows, err := db.Query(`SELECT id, name, key_hash, prefix, ip_whitelist, created_at, last_used FROM api_keys ORDER BY created_at, id`)
+	rows, err := db.Query(`SELECT id, name, key_hash, prefix, ip_whitelist, created_at, last_used, scopes, expires_at, disabled, container_uuids, last_used_ip FROM api_keys ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -677,9 +754,16 @@ func loadAPIKeys() ([]ApiKeyConfig, error) {
 	result := []ApiKeyConfig{}
 	for rows.Next() {
 		var k ApiKeyConfig
-		if err := rows.Scan(&k.ID, &k.Name, &k.KeyHash, &k.Prefix, &k.IPWhitelist, &k.CreatedAt, &k.LastUsed); err != nil {
+		var scopes, expiresAt, containerUUIDs, lastUsedIP sql.NullString
+		var disabled sql.NullInt64
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyHash, &k.Prefix, &k.IPWhitelist, &k.CreatedAt, &k.LastUsed, &scopes, &expiresAt, &disabled, &containerUUIDs, &lastUsedIP); err != nil {
 			return nil, err
 		}
+		k.Scopes = decodeStringSlice(scopes.String)
+		k.ExpiresAt = expiresAt.String
+		k.Disabled = disabled.Valid && disabled.Int64 != 0
+		k.ContainerUUIDs = decodeStringSlice(containerUUIDs.String)
+		k.LastUsedIP = lastUsedIP.String
 		result = append(result, k)
 	}
 	return result, rows.Err()
@@ -709,7 +793,7 @@ func loadAuditLogs() ([]AuditLog, error) {
 
 func loadTasks() ([]SavedTask, error) {
 	rows, err := db.Query(`SELECT
-		id, type, container_id, container_name, status, error, created_at, template_id, user,
+		id, type, container_id, container_name, status, error, created_at, template_id, user, ip, user_agent,
 		cfg_name, cfg_virtualization, cfg_template_id, cfg_vcpu, cfg_cpu_percent, cfg_ram_mb, cfg_disk_gb,
 		cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
 		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_snapshot_limit,
@@ -725,8 +809,9 @@ func loadTasks() ([]SavedTask, error) {
 		var t SavedTask
 		var cfg savedTaskConfig
 		var assignIPv6 int
+		var ip, userAgent sql.NullString
 		if err := rows.Scan(
-			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User,
+			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User, &ip, &userAgent,
 			&cfg.Name, &cfg.Virtualization, &cfg.TemplateID, &cfg.VCPU, &cfg.CPUPercent, &cfg.RAMMB, &cfg.DiskGB,
 			&cfg.NetworkBWMbps, &cfg.MonthlyTrafficGB, &cfg.TrafficMode, &cfg.TrafficInGB,
 			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.PortMappingCount, &cfg.SnapshotLimit,
@@ -734,6 +819,8 @@ func loadTasks() ([]SavedTask, error) {
 		); err != nil {
 			return nil, err
 		}
+		t.IP = ip.String
+		t.UserAgent = userAgent.String
 		cfg.AssignIPv6 = assignIPv6 != 0
 		result = append(result, t)
 		configs = append(configs, cfg)

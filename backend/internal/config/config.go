@@ -33,6 +33,8 @@ type SavedTask struct {
 	TemplateID    string `json:"template_id,omitempty"`
 	Config        string `json:"config,omitempty"`
 	User          string `json:"user,omitempty"`
+	IP            string `json:"ip,omitempty"`
+	UserAgent     string `json:"user_agent,omitempty"`
 }
 
 // SavedLoginLog for persisting login logs
@@ -152,13 +154,18 @@ func (c *Container) VirshName() string {
 
 // SubUser represents a sub-user with access to specific containers
 type ApiKeyConfig struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	KeyHash     string `json:"key_hash"`
-	Prefix      string `json:"prefix"`
-	IPWhitelist string `json:"ip_whitelist"`
-	CreatedAt   string `json:"created_at"`
-	LastUsed    string `json:"last_used"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	KeyHash        string   `json:"key_hash"`
+	Prefix         string   `json:"prefix"`
+	IPWhitelist    string   `json:"ip_whitelist"`
+	CreatedAt      string   `json:"created_at"`
+	LastUsed       string   `json:"last_used"`
+	Scopes         []string `json:"scopes,omitempty"`
+	ExpiresAt      string   `json:"expires_at,omitempty"`
+	Disabled       bool     `json:"disabled,omitempty"`
+	ContainerUUIDs []string `json:"container_uuids,omitempty"`
+	LastUsedIP     string   `json:"last_used_ip,omitempty"`
 }
 
 // DeleteApiKey removes an API key by ID
@@ -391,6 +398,12 @@ func normalizeConfigDefaults(dataDir string) {
 	}
 	if AppConfig.ApiKeys == nil {
 		AppConfig.ApiKeys = make([]ApiKeyConfig, 0)
+	} else {
+		for i := range AppConfig.ApiKeys {
+			if len(AppConfig.ApiKeys[i].Scopes) == 0 {
+				AppConfig.ApiKeys[i].Scopes = []string{"*"}
+			}
+		}
 	}
 	if AppConfig.AuditLogs == nil {
 		AppConfig.AuditLogs = make([]AuditLog, 0)

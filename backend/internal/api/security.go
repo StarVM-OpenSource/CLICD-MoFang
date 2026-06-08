@@ -654,18 +654,27 @@ func HandleSecurityAlerts(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "security:read") {
+		return
+	}
 
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: mergedSecurityAlerts()})
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: filterSecurityAlertsForRequest(r, mergedSecurityAlerts())})
 }
 
 // HandleSecuritySettings returns or updates security automation settings.
 func HandleSecuritySettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireScope(w, r, "security:read") {
+			return
+		}
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]bool{
 			"auto_shutdown": config.AppConfig.SecurityAutoShutdown,
 		}})
 	case http.MethodPut:
+		if !requireScope(w, r, "security:settings") {
+			return
+		}
 		var req struct {
 			AutoShutdown bool `json:"auto_shutdown"`
 		}
@@ -678,6 +687,7 @@ func HandleSecuritySettings(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 			return
 		}
+		auditRequest(r, "security.settings", "auto_shutdown", fmt.Sprintf("auto_shutdown=%v", req.AutoShutdown), true, "")
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]bool{
 			"auto_shutdown": config.AppConfig.SecurityAutoShutdown,
 		}})
@@ -690,6 +700,9 @@ func HandleSecuritySettings(w http.ResponseWriter, r *http.Request) {
 func HandleSecurityCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "security:check") {
 		return
 	}
 
@@ -706,6 +719,10 @@ func HandleSecurityCheck(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found or not running"})
 		return
 	}
+	if !isContainerAllowedForRequest(r, c.UUID) {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this container"})
+		return
+	}
 
 	ensureScanner().checkContainer(c.Name, c.IP)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Security check completed"})
@@ -715,6 +732,9 @@ func HandleSecurityCheck(w http.ResponseWriter, r *http.Request) {
 func HandleSecurityLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "security:read") {
 		return
 	}
 
@@ -727,6 +747,10 @@ func HandleSecurityLogs(w http.ResponseWriter, r *http.Request) {
 	c := config.FindContainerByName(containerName)
 	if c == nil || c.IP == "" {
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: []map[string]interface{}{}})
+		return
+	}
+	if !isContainerAllowedForRequest(r, c.UUID) {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this container"})
 		return
 	}
 
@@ -781,12 +805,15 @@ func HandleContainerSecuritySummary(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "security:read") {
+		return
+	}
 
 	critical := 0
 	high := 0
 	medium := 0
 	low := 0
-	alerts := mergedSecurityAlerts()
+	alerts := filterSecurityAlertsForRequest(r, mergedSecurityAlerts())
 	for _, a := range alerts {
 		switch a.Severity {
 		case "critical":
@@ -810,6 +837,20 @@ func HandleContainerSecuritySummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: summary})
+}
+
+func filterSecurityAlertsForRequest(r *http.Request, alerts []SecurityAlert) []SecurityAlert {
+	allowed, restricted := requestAllowedContainers(r)
+	if !restricted {
+		return alerts
+	}
+	filtered := make([]SecurityAlert, 0, len(alerts))
+	for _, alert := range alerts {
+		if c := config.FindContainerByName(alert.ContainerName); c != nil && isContainerAllowed(allowed, c) {
+			filtered = append(filtered, alert)
+		}
+	}
+	return filtered
 }
 
 func mergedSecurityAlerts() []SecurityAlert {

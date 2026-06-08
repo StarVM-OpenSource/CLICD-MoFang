@@ -56,6 +56,9 @@ func HandleLoginLogs(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "loginlog:read") {
+		return
+	}
 
 	// Return in reverse (newest first)
 	reversed := make([]LoginLog, len(loginLogs))

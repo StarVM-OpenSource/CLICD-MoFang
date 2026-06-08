@@ -7,6 +7,9 @@ func HandleIPv6Status(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "ipv6:read") {
+		return
+	}
 	status := lxcManager.DetectIPv6Status()
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: status})
 }

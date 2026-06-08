@@ -20,8 +20,18 @@ var lxcManager = lxc.NewManager()
 func HandleContainers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireScope(w, r, "container:read") {
+			return
+		}
 		listContainers(w, r)
 	case http.MethodPost:
+		if !requireScope(w, r, "container:create") {
+			return
+		}
+		if isAccessRestrictedRequest(r) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Container-bound API keys cannot create containers"})
+			return
+		}
 		createContainer(w, r)
 	default:
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
@@ -30,7 +40,8 @@ func HandleContainers(w http.ResponseWriter, r *http.Request) {
 
 // HandleSingleContainer handles individual container operations by ID or name: /api/containers/{id-or-name}/...
 func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/containers/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/containers/")
+	path = strings.TrimPrefix(path, "/api/containers/")
 	parts := strings.SplitN(path, "/", 2)
 	c := containerByIdentifier(parts[0])
 	id := 0
@@ -50,6 +61,10 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
 		return
 	}
+	if !isSnapshotAction && !isContainerAllowedForRequest(r, parts[0]) {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this container"})
+		return
+	}
 	if isSnapshotAction && id == 0 {
 		// For orphaned snapshots, resolve containerID from the snapshot itself
 		snapshotID := strings.TrimPrefix(action, "snapshots/")
@@ -61,45 +76,105 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 		}
 		id = snapshot.ContainerID
 	}
+	if isSnapshotAction {
+		if c := config.FindContainer(id); c != nil && !isContainerAllowedForRequest(r, c.UUID) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this container"})
+			return
+		}
+	}
 
 	switch {
 	case action == "start" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "container:power") {
+			return
+		}
 		HandleSingleTaskAction(w, r, id, "start")
 	case action == "stop" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "container:power") {
+			return
+		}
 		HandleSingleTaskAction(w, r, id, "stop")
 	case action == "restart" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "container:power") {
+			return
+		}
 		HandleSingleTaskAction(w, r, id, "restart")
 	case action == "reinstall" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "container:reinstall") {
+			return
+		}
 		HandleSingleTaskAction(w, r, id, "reinstall")
 	case action == "delete" && r.Method == http.MethodDelete:
+		if !requireScope(w, r, "container:delete") {
+			return
+		}
 		HandleSingleTaskAction(w, r, id, "delete")
 	case action == "reset-password" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "container:password") {
+			return
+		}
 		resetSSHPassword(w, r, id)
 	case action == "usage" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "container:read") {
+			return
+		}
 		getUsage(w, r, id)
 	case action == "traffic" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "container:read") {
+			return
+		}
 		getTraffic(w, r, id)
 	case action == "traffic-reset" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "container:traffic") {
+			return
+		}
 		resetTraffic(w, r, id)
 	case action == "traffic-limit" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "container:traffic") {
+			return
+		}
 		updateTrafficLimit(w, r, id)
 	case action == "resource-limit" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "container:resize") {
+			return
+		}
 		updateResourceLimit(w, r, id)
 	case action == "random-port" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
 		getRandomPort(w, r, id)
 	case action == "expiry" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "container:resize") {
+			return
+		}
 		updateExpiry(w, r, id)
 	case action == "ipv6" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "ipv6:assign") {
+			return
+		}
 		assignIPv6(w, r, id)
 	case action == "snapshots" || strings.HasPrefix(action, "snapshots/"):
 		handleContainerSnapshots(w, r, id, action)
 	case action == "port-mappings" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
 		addPortMapping(w, r, id)
 	case strings.HasPrefix(action, "port-mappings/") && r.Method == http.MethodPut:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
 		updatePortMapping(w, r, id, strings.TrimPrefix(action, "port-mappings/"))
 	case strings.HasPrefix(action, "port-mappings/") && r.Method == http.MethodDelete:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
 		deletePortMapping(w, r, id, strings.TrimPrefix(action, "port-mappings/"))
 	case r.Method == http.MethodGet:
+		if !requireScope(w, r, "container:read") {
+			return
+		}
 		getContainer(w, r, id)
 	default:
 		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Action not found"})
@@ -348,6 +423,9 @@ func HandleTemplates(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "image:read") {
+		return
+	}
 	if isSubUserRequest(r) {
 		HandleEnabledImages(w, r)
 		return
@@ -362,7 +440,11 @@ func HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "dashboard:read") {
+		return
+	}
 	containers, _ := listByRuntime()
+	containers = filterContainersForRequest(r, containers)
 	running := 0
 	stopped := 0
 	for _, c := range containers {
@@ -384,6 +466,9 @@ func HandleDashboard(w http.ResponseWriter, r *http.Request) {
 func HandleHostInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "host:read") {
 		return
 	}
 	info := getHostInfo()

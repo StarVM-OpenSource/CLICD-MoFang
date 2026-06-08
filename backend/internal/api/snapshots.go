@@ -16,7 +16,11 @@ func HandleSnapshots(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "snapshot:read") {
+		return
+	}
 	snapshots := append([]config.Snapshot(nil), config.AppConfig.Snapshots...)
+	snapshots = filterSnapshotsForRequest(r, snapshots)
 	sortSnapshotsNewestFirst(snapshots)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: snapshots})
 }
@@ -24,17 +28,35 @@ func HandleSnapshots(w http.ResponseWriter, r *http.Request) {
 func handleContainerSnapshots(w http.ResponseWriter, r *http.Request, containerID int, action string) {
 	switch {
 	case action == "snapshots" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "snapshot:read") {
+			return
+		}
 		listContainerSnapshots(w, r, containerID)
 	case action == "snapshots" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "snapshot:create") {
+			return
+		}
 		createContainerSnapshot(w, r, containerID)
 	case action == "snapshots/schedule" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "snapshot:schedule") {
+			return
+		}
 		updateSnapshotSchedule(w, r, containerID)
 	case action == "snapshots/quota" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "snapshot:schedule") {
+			return
+		}
 		updateSnapshotQuota(w, r, containerID)
 	case strings.HasPrefix(action, "snapshots/") && strings.HasSuffix(action, "/restore") && r.Method == http.MethodPost:
+		if !requireScope(w, r, "snapshot:restore") {
+			return
+		}
 		snapshotID := strings.TrimSuffix(strings.TrimPrefix(action, "snapshots/"), "/restore")
 		restoreContainerSnapshot(w, r, containerID, snapshotID)
 	case strings.HasPrefix(action, "snapshots/") && r.Method == http.MethodDelete:
+		if !requireScope(w, r, "snapshot:delete") {
+			return
+		}
 		snapshotID := strings.TrimPrefix(action, "snapshots/")
 		deleteContainerSnapshot(w, r, containerID, snapshotID)
 	default:
@@ -186,15 +208,7 @@ func restoreContainerSnapshot(w http.ResponseWriter, r *http.Request, containerI
 }
 
 func requestUser(r *http.Request) string {
-	if claims, ok := claimsFromRequest(r); ok {
-		if subUser, _ := claims["sub_user"].(string); subUser != "" {
-			return "user:" + subUser
-		}
-		if username, _ := claims["username"].(string); username != "" {
-			return username
-		}
-	}
-	return "admin"
+	return requestActor(r)
 }
 
 func sortSnapshotsNewestFirst(snapshots []config.Snapshot) {
@@ -203,4 +217,18 @@ func sortSnapshotsNewestFirst(snapshots []config.Snapshot) {
 		tj, _ := time.Parse("2006-01-02 15:04:05", snapshots[j].CreatedAt)
 		return tj.Before(ti)
 	})
+}
+
+func filterSnapshotsForRequest(r *http.Request, snapshots []config.Snapshot) []config.Snapshot {
+	allowed, restricted := requestAllowedContainers(r)
+	if !restricted {
+		return snapshots
+	}
+	filtered := make([]config.Snapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if c := config.FindContainer(snapshot.ContainerID); c != nil && isContainerAllowed(allowed, c) {
+			filtered = append(filtered, snapshot)
+		}
+	}
+	return filtered
 }

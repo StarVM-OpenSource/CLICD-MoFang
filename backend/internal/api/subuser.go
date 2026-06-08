@@ -49,6 +49,9 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "subuser:create") {
+		return
+	}
 
 	var req struct {
 		ContainerName string `json:"container_name"`
@@ -281,13 +284,40 @@ func subUserAllowedContainers(r *http.Request) (subUserAccess, bool) {
 	return allowed, true
 }
 
+func requestAllowedContainers(r *http.Request) (subUserAccess, bool) {
+	if ctx, ok := authContextFromRequest(r); ok {
+		if ctx.Type == authTypeAPIKey && len(ctx.ContainerUUIDs) == 0 {
+			return subUserAccess{}, false
+		}
+		if ctx.Type == authTypeSubUser || ctx.Type == authTypeAPIKey {
+			allowed := subUserAccess{names: make(map[string]bool), uuids: make(map[string]bool)}
+			for _, uuid := range ctx.ContainerUUIDs {
+				allowed.uuids[uuid] = true
+			}
+			if ctx.Type == authTypeSubUser && len(ctx.ContainerUUIDs) == 0 {
+				legacy, ok := subUserAllowedContainers(r)
+				if ok {
+					return legacy, true
+				}
+			}
+			return allowed, true
+		}
+	}
+	return subUserAllowedContainers(r)
+}
+
+func isAccessRestrictedRequest(r *http.Request) bool {
+	_, restricted := requestAllowedContainers(r)
+	return restricted
+}
+
 func containerByIdentifier(identifier string) *config.Container {
 	return config.FindContainerByIdentifier(identifier)
 }
 
 func isContainerAllowedForRequest(r *http.Request, identifier string) bool {
-	allowed, isSubUser := subUserAllowedContainers(r)
-	if !isSubUser {
+	allowed, restricted := requestAllowedContainers(r)
+	if !restricted {
 		return true
 	}
 	c := containerByIdentifier(identifier)
@@ -301,6 +331,9 @@ func isContainerAllowedForRequest(r *http.Request, identifier string) bool {
 func HandleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "audit:read") {
 		return
 	}
 
@@ -327,12 +360,20 @@ func SubUserMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		path := r.URL.Path
-		if path == "/api/tasks" && r.Method == http.MethodGet {
+		containerPrefix := "/api/containers/"
+		containerListPath := "/api/containers"
+		tasksPath := "/api/tasks"
+		if strings.HasPrefix(path, "/api/v1/") {
+			containerPrefix = "/api/v1/containers/"
+			containerListPath = "/api/v1/containers"
+			tasksPath = "/api/v1/tasks"
+		}
+		if path == tasksPath && r.Method == http.MethodGet {
 			next(w, r)
 			return
 		}
 
-		if path == "/api/containers" {
+		if path == containerListPath {
 			if r.Method != http.MethodGet {
 				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Sub-users cannot create containers"})
 				return
@@ -341,8 +382,8 @@ func SubUserMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		if len(path) > len("/api/containers/") {
-			rest := path[len("/api/containers/"):]
+		if strings.HasPrefix(path, containerPrefix) {
+			rest := path[len(containerPrefix):]
 			parts := splitPath(rest)
 			if len(parts) > 0 && parts[0] != "" {
 				c := containerByIdentifier(parts[0])
@@ -373,8 +414,8 @@ func SubUserMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func filterContainersForRequest(r *http.Request, containers []config.Container) []config.Container {
-	allowed, isSubUser := subUserAllowedContainers(r)
-	if !isSubUser {
+	allowed, restricted := requestAllowedContainers(r)
+	if !restricted {
 		return containers
 	}
 	filtered := make([]config.Container, 0, len(containers))
@@ -387,33 +428,47 @@ func filterContainersForRequest(r *http.Request, containers []config.Container) 
 }
 
 func filterTasksForRequest(r *http.Request, tasks []*Task) []*Task {
-	allowed, isSubUser := subUserAllowedContainers(r)
-	if !isSubUser {
-		return tasks
-	}
 	filtered := make([]*Task, 0, len(tasks))
 	for _, task := range tasks {
-		if c := config.FindContainer(task.ContainerID); c != nil && isContainerAllowed(allowed, c) {
+		if isTaskAllowedForRequest(r, task) {
 			filtered = append(filtered, task)
-			continue
-		}
-		if task.ContainerName != "" {
-			if c := config.FindContainerByName(task.ContainerName); c != nil && isContainerAllowed(allowed, c) {
-				filtered = append(filtered, task)
-				continue
-			}
-		}
-		if task.Config.Name != "" {
-			if c := config.FindContainerByName(task.Config.Name); c != nil && isContainerAllowed(allowed, c) {
-				filtered = append(filtered, task)
-			}
 		}
 	}
 	return filtered
 }
 
+func isTaskAllowedForRequest(r *http.Request, task *Task) bool {
+	allowed, restricted := requestAllowedContainers(r)
+	if !restricted {
+		return true
+	}
+	if task == nil {
+		return false
+	}
+	if c := config.FindContainer(task.ContainerID); c != nil && isContainerAllowed(allowed, c) {
+		return true
+	}
+	if task.ContainerName != "" {
+		if c := config.FindContainerByName(task.ContainerName); c != nil && isContainerAllowed(allowed, c) {
+			return true
+		}
+	}
+	if task.Config.Name != "" {
+		if c := config.FindContainerByName(task.Config.Name); c != nil && isContainerAllowed(allowed, c) {
+			return true
+		}
+	}
+	return false
+}
+
 func isContainerAllowed(allowed subUserAccess, c *config.Container) bool {
-	return c != nil && c.UUID != "" && allowed.uuids[c.UUID]
+	if c == nil {
+		return false
+	}
+	if c.UUID != "" && allowed.uuids[c.UUID] {
+		return true
+	}
+	return c.Name != "" && allowed.names[c.Name]
 }
 
 func isSubUserBlockedAction(action string, method string) bool {
@@ -536,6 +591,9 @@ func HandleSubUserList(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "subuser:read") {
+		return
+	}
 
 	result := make([]SubUserListItem, 0, len(config.AppConfig.SubUsers))
 	for _, su := range config.AppConfig.SubUsers {
@@ -585,7 +643,8 @@ func HandleSubUserList(w http.ResponseWriter, r *http.Request) {
 
 // HandleSubUserAction handles actions on a specific sub-user
 func HandleSubUserAction(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/sub-users/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/sub-users/")
+	path = strings.TrimPrefix(path, "/api/sub-users/")
 	parts := strings.SplitN(path, "/", 2)
 	subUserID := parts[0]
 	action := ""
@@ -608,6 +667,9 @@ func HandleSubUserAction(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case action == "rotate-password" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "subuser:update") {
+			return
+		}
 		password := generateRandomStr(16)
 		if hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
 			target.PassHash = string(hash)
@@ -625,11 +687,17 @@ func HandleSubUserAction(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to generate password"})
 
 	case action == "audit-logs" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "audit:read") {
+			return
+		}
 		// Filter audit logs for this sub-user
 		logs := filterSubUserAuditLogs(target.Username)
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: logs})
 
 	case action == "login-logs" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "loginlog:read") {
+			return
+		}
 		// Filter login logs for this sub-user
 		logs := filterSubUserLoginLogs(target.Username)
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: logs})

@@ -122,9 +122,13 @@ func (q *TaskQueue) EnqueueBatchWithAudit(taskType TaskType, ids []int, template
 }
 
 func (q *TaskQueue) EnqueueBatchCreate(configs []lxc.ContainerConfig) []string {
+	return q.EnqueueBatchCreateWithAudit(configs, "admin", "", "")
+}
+
+func (q *TaskQueue) EnqueueBatchCreateWithAudit(configs []lxc.ContainerConfig, user string, ip string, userAgent string) []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.enqueueBatchCreateList(configs)
+	return q.enqueueBatchCreateList(configs, user, ip, userAgent)
 }
 
 func (q *TaskQueue) ActiveCreateNames() map[string]bool {
@@ -147,7 +151,7 @@ func (q *TaskQueue) ActiveCreateNames() map[string]bool {
 	return names
 }
 
-func (q *TaskQueue) enqueueBatchCreateList(configs []lxc.ContainerConfig) []string {
+func (q *TaskQueue) enqueueBatchCreateList(configs []lxc.ContainerConfig, user string, ip string, userAgent string) []string {
 	var result []string
 	for _, cfg := range configs {
 		cfgCopy := cfg
@@ -161,6 +165,9 @@ func (q *TaskQueue) enqueueBatchCreateList(configs []lxc.ContainerConfig) []stri
 			Status:        "pending",
 			CreatedAt:     time.Now().Format("2006-01-02 15:04:05"),
 			Config:        cfgCopy,
+			User:          user,
+			IP:            ip,
+			UserAgent:     userAgent,
 		}
 		q.enqueueTask(task)
 		result = append(result, task.ID)
@@ -424,6 +431,8 @@ func (q *TaskQueue) persistTasks() {
 			TemplateID:    t.TemplateID,
 			Config:        string(cfgJSON),
 			User:          t.User,
+			IP:            t.IP,
+			UserAgent:     t.UserAgent,
 		})
 	}
 	config.SaveTasks(saved)
@@ -456,13 +465,8 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 		name = c.Name
 	}
 
-	// Determine user from JWT claims
-	user := "admin"
-	if claims, ok := claimsFromRequest(r); ok {
-		if subUser, _ := claims["sub_user"].(string); subUser != "" {
-			user = "user:" + subUser
-		}
-	}
+	// Determine user from authenticated request context.
+	user := requestActor(r)
 	ip := clientIP(r)
 	userAgent := r.Header.Get("User-Agent")
 
@@ -515,6 +519,13 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "container:create") {
+		return
+	}
+	if isAccessRestrictedRequest(r) {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Container-bound API keys cannot create containers"})
 		return
 	}
 	var req struct {
@@ -576,7 +587,7 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		requestNames[name] = true
 	}
-	ids := globalQueue.EnqueueBatchCreate(req.Containers)
+	ids := globalQueue.EnqueueBatchCreateWithAudit(req.Containers, requestActor(r), clientIP(r), r.UserAgent())
 	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Data: ids})
 }
 
@@ -584,6 +595,10 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !hasAnyScope(r, "container:power", "container:delete", "container:reinstall") {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Insufficient API key scope"})
 		return
 	}
 	var req struct {
@@ -597,21 +612,47 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var taskType TaskType
+	var requiredScope string
 	switch req.Action {
 	case "start":
 		taskType = TaskStart
+		requiredScope = "container:power"
 	case "stop":
 		taskType = TaskStop
+		requiredScope = "container:power"
 	case "restart":
 		taskType = TaskRestart
+		requiredScope = "container:power"
 	case "delete":
 		taskType = TaskDelete
+		requiredScope = "container:delete"
+	case "reinstall":
+		if req.TemplateID == "" {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "template_id required"})
+			return
+		}
+		if !isTemplateEnabledAndDownloaded(req.TemplateID) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
+			return
+		}
+		taskType = TaskReinstall
+		requiredScope = "container:reinstall"
 	default:
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Unknown action"})
 		return
 	}
+	if !requireScope(w, r, requiredScope) {
+		return
+	}
+	for _, id := range req.Containers {
+		c := config.FindContainer(id)
+		if c == nil || !isContainerAllowedForRequest(r, c.UUID) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to one or more containers"})
+			return
+		}
+	}
 
-	ids := globalQueue.EnqueueBatch(taskType, req.Containers, req.TemplateID)
+	ids := globalQueue.EnqueueBatchWithAudit(taskType, req.Containers, req.TemplateID, requestActor(r), clientIP(r), r.UserAgent())
 	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Data: ids})
 }
 
@@ -621,13 +662,22 @@ func HandleTaskDelete(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
-	// URL: /api/tasks/{id}
-	taskID := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	if !requireScope(w, r, "task:delete") {
+		return
+	}
+	// URL: /api/tasks/{id} or /api/v1/tasks/{id}
+	taskID := strings.TrimPrefix(r.URL.Path, "/api/v1/tasks/")
+	taskID = strings.TrimPrefix(taskID, "/api/tasks/")
 	if taskID == "" {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Task ID required"})
 		return
 	}
 	globalQueue.mu.Lock()
+	if task := globalQueue.tasks[taskID]; task != nil && !isTaskAllowedForRequest(r, task) {
+		globalQueue.mu.Unlock()
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this task"})
+		return
+	}
 	delete(globalQueue.tasks, taskID)
 	// Also remove from both queues if pending
 	newCreate := make([]*Task, 0, len(globalQueue.createQueue))
@@ -653,6 +703,9 @@ func HandleTaskDelete(w http.ResponseWriter, r *http.Request) {
 func HandleTasks(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "task:read") {
 		return
 	}
 	tasks := globalQueue.GetTasks()
@@ -691,6 +744,8 @@ func RestoreTasks() {
 			TemplateID:    st.TemplateID,
 			Config:        cfg,
 			User:          st.User,
+			IP:            st.IP,
+			UserAgent:     st.UserAgent,
 		}
 		if st.Status == "pending" || st.Status == "running" {
 			// Reset running tasks back to pending so they get retried

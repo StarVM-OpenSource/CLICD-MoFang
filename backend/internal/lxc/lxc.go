@@ -2258,13 +2258,15 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	// Clean port mappings temporarily
 	m.CleanPortMappings(id)
 
-	// Destroy old LXC but keep config
+	// Destroy old LXC but keep config. lxc-destroy can leave the config
+	// directory behind when rootfs mounts are still present, which makes the
+	// following lxc-create fail with "Container already exists".
 	exec.Command("lxc-stop", "-n", lxcName, "-k").Run()
-	exec.Command("lxc-destroy", "-n", lxcName, "-f").Run()
 	rootfs := filepath.Join(m.LxcPath, lxcName, "rootfs")
 	exec.Command("umount", "-R", "-l", rootfs).Run()
-	os.RemoveAll(rootfs)
-	os.Remove(filepath.Join(m.LxcPath, lxcName, "rootfs.img"))
+	exec.Command("lxc-destroy", "-n", lxcName, "-f").Run()
+	exec.Command("umount", "-R", "-l", rootfs).Run()
+	os.RemoveAll(filepath.Join(m.LxcPath, lxcName))
 
 	// Create new container with same LXC name (preserves ID)
 	cmd := exec.Command("lxc-create",

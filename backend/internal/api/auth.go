@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -26,6 +27,132 @@ type APIResponse struct {
 	Success bool        `json:"success"`
 	Message string      `json:"message,omitempty"`
 	Data    interface{} `json:"data,omitempty"`
+}
+
+type authContextKey struct{}
+
+type AuthContext struct {
+	Type           string
+	Username       string
+	ApiKeyID       string
+	ApiKeyName     string
+	Actor          string
+	Scopes         []string
+	ContainerUUIDs []string
+}
+
+const (
+	authTypeAdmin   = "admin"
+	authTypeSubUser = "sub_user"
+	authTypeAPIKey  = "api_key"
+)
+
+func withAuthContext(r *http.Request, auth AuthContext) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), authContextKey{}, auth))
+}
+
+func authContextFromRequest(r *http.Request) (AuthContext, bool) {
+	ctx, ok := r.Context().Value(authContextKey{}).(AuthContext)
+	return ctx, ok
+}
+
+func requestActor(r *http.Request) string {
+	if ctx, ok := authContextFromRequest(r); ok && ctx.Actor != "" {
+		return ctx.Actor
+	}
+	if claims, ok := claimsFromRequest(r); ok {
+		if subUser, _ := claims["sub_user"].(string); subUser != "" {
+			return "user:" + subUser
+		}
+		if username, _ := claims["username"].(string); username != "" {
+			return username
+		}
+	}
+	return "admin"
+}
+
+func hasScope(r *http.Request, scope string) bool {
+	ctx, ok := authContextFromRequest(r)
+	if !ok {
+		return true
+	}
+	switch ctx.Type {
+	case authTypeAdmin:
+		return true
+	case authTypeSubUser:
+		return subUserScopeAllowed(scope)
+	case authTypeAPIKey:
+		return scopeAllowed(ctx.Scopes, scope)
+	default:
+		return false
+	}
+}
+
+func subUserScopeAllowed(scope string) bool {
+	switch scope {
+	case "container:read", "container:power", "container:reinstall", "container:network",
+		"dashboard:read", "image:read", "task:read", "snapshot:read", "snapshot:create", "snapshot:delete", "snapshot:restore", "snapshot:schedule",
+		"terminal:ssh", "terminal:vnc":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasAnyScope(r *http.Request, scopes ...string) bool {
+	for _, scope := range scopes {
+		if hasScope(r, scope) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeAllowed(scopes []string, required string) bool {
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "*" || scope == "admin:*" || scope == required {
+			return true
+		}
+		if strings.HasSuffix(scope, ":*") {
+			prefix := strings.TrimSuffix(scope, "*")
+			if strings.HasPrefix(required, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func requireScope(w http.ResponseWriter, r *http.Request, scope string) bool {
+	if hasScope(r, scope) {
+		return true
+	}
+	jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Insufficient API key scope"})
+	return false
+}
+
+func ScopeMiddleware(scope string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireScope(w, r, scope) {
+			return
+		}
+		next(w, r)
+	}
+}
+
+func AnyScopeMiddleware(scopes []string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if hasAnyScope(r, scopes...) {
+			next(w, r)
+			return
+		}
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Insufficient API key scope"})
+	}
+}
+
+func auditRequest(r *http.Request, action, target, detail string, success bool, errMsg string) {
+	config.AddAuditLogFull(action, target, detail, requestActor(r), clientIP(r), r.UserAgent(), success, errMsg)
 }
 
 func jsonResponse(w http.ResponseWriter, status int, resp APIResponse) {
@@ -101,6 +228,9 @@ func claimsFromRequest(r *http.Request) (jwt.MapClaims, bool) {
 }
 
 func isSubUserRequest(r *http.Request) bool {
+	if ctx, ok := authContextFromRequest(r); ok {
+		return ctx.Type == authTypeSubUser
+	}
 	claims, ok := claimsFromRequest(r)
 	if !ok {
 		return false
@@ -215,19 +345,45 @@ func HandleCheckAuth(w http.ResponseWriter, r *http.Request) {
 func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenString := tokenFromRequest(r)
-		if !isValidToken(tokenString) && !isValidApiKeyRequest(r) {
-			jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Authentication required"})
+		if claims, ok := claimsFromToken(tokenString); ok {
+			if subUser, _ := claims["sub_user"].(string); subUser != "" {
+				auth := AuthContext{Type: authTypeSubUser, Username: subUser, Actor: "user:" + subUser}
+				if values, ok := claims["container_uuids"].([]interface{}); ok {
+					for _, value := range values {
+						if uuid, ok := value.(string); ok {
+							auth.ContainerUUIDs = append(auth.ContainerUUIDs, uuid)
+						}
+					}
+				}
+				next(w, withAuthContext(r, auth))
+				return
+			}
+			username, _ := claims["username"].(string)
+			if username == "" {
+				username = config.AppConfig.AdminUser
+			}
+			next(w, withAuthContext(r, AuthContext{Type: authTypeAdmin, Username: username, Actor: username}))
 			return
 		}
 
-		next(w, r)
+		if key, ok := validateApiKeyRequest(r); ok {
+			next(w, withAuthContext(r, authContextFromAPIKey(key)))
+			return
+		}
+
+		jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Authentication required"})
 	}
 }
 
 // AdminMiddleware requires a valid administrator token and rejects sub-user tokens.
 func AdminMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if isSubUserRequest(r) {
+		ctx, _ := authContextFromRequest(r)
+		if ctx.Type == authTypeSubUser {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Administrator permission required"})
+			return
+		}
+		if ctx.Type == authTypeAPIKey && !scopeAllowed(ctx.Scopes, "admin:access") {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Administrator permission required"})
 			return
 		}

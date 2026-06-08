@@ -221,6 +221,9 @@ func HandleImages(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "image:read") {
+		return
+	}
 
 	enabledSet := getEnabledImageSet()
 	cleanupOldImageDownloadErrors()
@@ -285,6 +288,9 @@ func HandleImages(w http.ResponseWriter, r *http.Request) {
 func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "image:download") {
 		return
 	}
 
@@ -397,6 +403,9 @@ func HandleImageCancel(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "image:download") {
+		return
+	}
 	var req struct {
 		TemplateID string `json:"template_id"`
 	}
@@ -432,6 +441,9 @@ func HandleImageCancel(w http.ResponseWriter, r *http.Request) {
 func HandleImageDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "image:delete") {
 		return
 	}
 
@@ -484,6 +496,9 @@ func HandleImageToggle(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "image:toggle") {
+		return
+	}
 
 	var req struct {
 		TemplateID string `json:"template_id"`
@@ -508,6 +523,9 @@ func HandleImageToggle(w http.ResponseWriter, r *http.Request) {
 func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "image:read") {
 		return
 	}
 

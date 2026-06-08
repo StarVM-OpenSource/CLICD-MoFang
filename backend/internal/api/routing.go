@@ -50,6 +50,9 @@ func HandleRouting(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "routing:read") {
+		return
+	}
 
 	nat4Mappings := make([]nat4Route, 0)
 	usedPorts := map[int]bool{}
