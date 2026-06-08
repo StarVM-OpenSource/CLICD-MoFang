@@ -59,7 +59,6 @@ backend/tmp/
 *.swo
 *~
 .claude/
-*.claude/
 
 # OS
 .DS_Store
