@@ -18,7 +18,10 @@ import (
 type webVNCTicket struct {
 	ContainerName string
 	ContainerUUID string
+	Username      string
 	SubUser       bool
+	ClientIP      string
+	UserAgent     string
 	ExpiresAt     time.Time
 }
 
@@ -58,13 +61,17 @@ func HandleVNCTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	username, isSubUser := vncRequesterIdentity(r)
 	ticket := randomHex(32)
 	webVNCTickets.Lock()
 	cleanupExpiredWebVNCTicketsLocked(time.Now())
 	webVNCTickets.items[ticket] = webVNCTicket{
 		ContainerName: c.Name,
 		ContainerUUID: c.UUID,
-		SubUser:       isSubUserRequest(r),
+		Username:      username,
+		SubUser:       isSubUser,
+		ClientIP:      clientIP(r),
+		UserAgent:     r.UserAgent(),
 		ExpiresAt:     time.Now().Add(60 * time.Second),
 	}
 	webVNCTickets.Unlock()
@@ -89,7 +96,7 @@ func HandleVNCProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	item, ok := consumeWebVNCTicket(ticket, containerName)
+	item, ok := consumeWebVNCTicket(ticket, containerName, r)
 	if !ok {
 		http.Error(w, "invalid or expired ticket", http.StatusUnauthorized)
 		return
@@ -137,7 +144,7 @@ func HandleVNCProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	log.Printf("WebVNC connected for container %s -> 127.0.0.1:%d", containerName, vncPort)
+	log.Printf("WebVNC connected for container %s as %s (sub_user=%t) -> 127.0.0.1:%d", containerName, item.Username, item.SubUser, vncPort)
 
 	done := make(chan string, 2)
 	var writeMu sync.Mutex
@@ -147,7 +154,21 @@ func HandleVNCProxy(w http.ResponseWriter, r *http.Request) {
 	reason := <-done
 	_ = vncConn.Close()
 	_ = ws.Close()
-	log.Printf("WebVNC disconnected for container %s: %s", containerName, reason)
+	log.Printf("WebVNC disconnected for container %s as %s: %s", containerName, item.Username, reason)
+}
+
+func vncRequesterIdentity(r *http.Request) (string, bool) {
+	claims, ok := claimsFromRequest(r)
+	if !ok {
+		return "api-key", false
+	}
+	if subUser, ok := claims["sub_user"].(string); ok && subUser != "" {
+		return subUser, true
+	}
+	if username, ok := claims["username"].(string); ok && username != "" {
+		return username, false
+	}
+	return "unknown", false
 }
 
 func webVNCTicketFromRequest(r *http.Request) string {
@@ -175,7 +196,7 @@ func webVNCResponseProtocol(r *http.Request) string {
 	return ""
 }
 
-func consumeWebVNCTicket(ticket, containerName string) (webVNCTicket, bool) {
+func consumeWebVNCTicket(ticket, containerName string, r *http.Request) (webVNCTicket, bool) {
 	now := time.Now()
 	webVNCTickets.Lock()
 	defer webVNCTickets.Unlock()
@@ -185,7 +206,10 @@ func consumeWebVNCTicket(ticket, containerName string) (webVNCTicket, bool) {
 		return webVNCTicket{}, false
 	}
 	delete(webVNCTickets.items, ticket)
-	return item, item.ContainerName == containerName && now.Before(item.ExpiresAt)
+	return item, item.ContainerName == containerName &&
+		item.ClientIP == clientIP(r) &&
+		item.UserAgent == r.UserAgent() &&
+		now.Before(item.ExpiresAt)
 }
 
 func cleanupExpiredWebVNCTicketsLocked(now time.Time) {

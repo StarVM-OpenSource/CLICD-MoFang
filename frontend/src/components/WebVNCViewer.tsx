@@ -21,6 +21,46 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
     }
   }
 
+  const ensureResizeObserver = () => {
+    if ('ResizeObserver' in window) return
+
+    class FallbackResizeObserver {
+      private target: Element | null = null
+      private timer = 0
+      private lastWidth = -1
+      private lastHeight = -1
+
+      constructor(private callback: ResizeObserverCallback) {}
+
+      observe = (target: Element) => {
+        this.target = target
+        this.check()
+        this.timer = window.setInterval(this.check, 250)
+        window.addEventListener('resize', this.check)
+      }
+
+      unobserve = () => this.disconnect()
+
+      disconnect = () => {
+        if (this.timer) window.clearInterval(this.timer)
+        this.timer = 0
+        window.removeEventListener('resize', this.check)
+        this.target = null
+      }
+
+      private check = () => {
+        if (!this.target) return
+        const contentRect = this.target.getBoundingClientRect()
+        if (contentRect.width === this.lastWidth && contentRect.height === this.lastHeight) return
+        this.lastWidth = contentRect.width
+        this.lastHeight = contentRect.height
+        this.callback([{ target: this.target, contentRect } as ResizeObserverEntry], this as unknown as ResizeObserver)
+      }
+    }
+
+    ;(window as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = FallbackResizeObserver as unknown as typeof ResizeObserver
+  }
+
   const connect = async () => {
     const target = screenRef.current
     if (!target) return
@@ -47,7 +87,10 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
     }
 
     try {
-      const rfb = new RFB(target, getWebVNCUrl(containerName, ticket))
+      ensureResizeObserver()
+      const rfb = new RFB(target, getWebVNCUrl(containerName), {
+        wsProtocols: ['binary', `clicd-vnc-ticket.${ticket}`],
+      })
       rfb.scaleViewport = true
       rfb.resizeSession = false
       rfb.focusOnClick = true
@@ -76,7 +119,8 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
     } catch (err) {
       console.error(err)
       setStatus('error')
-      setErrorMsg('WebVNC 初始化失败')
+      const message = err instanceof Error && err.message ? `：${err.message}` : ''
+      setErrorMsg(`WebVNC 初始化失败${message}`)
     }
   }
 

@@ -456,10 +456,9 @@ export const getWebSSHUrl = (containerName: string) => {
   return `${protocol}//${window.location.host}/api/ssh?${params.toString()}`
 }
 
-export const getWebVNCUrl = (containerName: string, ticket?: string) => {
+export const getWebVNCUrl = (containerName: string) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const params = new URLSearchParams({ container: containerName })
-  if (ticket) params.set('ticket', ticket)
   return `${protocol}//${window.location.host}/api/vnc?${params.toString()}`
 }
 

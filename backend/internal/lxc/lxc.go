@@ -993,6 +993,27 @@ func parseSubIDRange(path, user string) (int, error) {
 	return 0, fmt.Errorf("%s must contain a %s subordinate id range with at least 65536 ids", path, user)
 }
 
+func (m *Manager) ensureUnprivilegedLXCPathAccess(lxcName string) error {
+	// Unprivileged container root maps to a subordinate host UID, so it needs
+	// execute permission on the LXC parent and container directories to reach
+	// rootfs. Some distributions create /var/lib/lxc as 750/700, which causes
+	// lxc-start to abort with "Could not access /var/lib/lxc".
+	for _, path := range []string{m.LxcPath, filepath.Join(m.LxcPath, lxcName)} {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		mode := info.Mode().Perm()
+		if mode&0001 != 0 {
+			continue
+		}
+		if err := os.Chmod(path, mode|0001); err != nil {
+			return fmt.Errorf("failed to fix LXC path permissions for %s: %v", path, err)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) shiftRootfsForUnprivileged(lxcName string) error {
 	uidBase, gidBase, err := unprivilegedIDMap()
 	if err != nil {
@@ -1000,6 +1021,9 @@ func (m *Manager) shiftRootfsForUnprivileged(lxcName string) error {
 	}
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
 	marker := filepath.Join(rootfsPath, ".clicd-unprivileged-shifted")
+	if err := m.ensureUnprivilegedLXCPathAccess(lxcName); err != nil {
+		return err
+	}
 	if _, err := os.Stat(marker); err == nil {
 		return nil
 	}

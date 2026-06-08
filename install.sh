@@ -784,6 +784,12 @@ setup_subids() {
     grep -q '^root:' /etc/subgid 2>/dev/null || echo 'root:100000:65536' >> /etc/subgid
 }
 
+configure_lxc_storage_access() {
+    log "Configuring LXC storage directory permissions..."
+    mkdir -p /var/lib/lxc
+    chmod 755 /var/lib/lxc
+}
+
 try_enable_project_quota() {
     root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
     root_fs="$(findmnt -no FSTYPE / 2>/dev/null || true)"
@@ -967,6 +973,7 @@ run_step "配置内核网络参数" configure_kernel_networking
 run_step "配置运行时服务" setup_runtime_services
 run_step "配置 libvirt default NAT 网络" setup_default_libvirt_network
 run_step "配置 UID/GID 映射" setup_subids
+run_step "Configure LXC storage permissions" configure_lxc_storage_access
 run_step "检查 project quota" try_enable_project_quota
 run_step "下载发行版包" download_release_if_needed
 run_step "安装 CLICD 二进制" install_binary
