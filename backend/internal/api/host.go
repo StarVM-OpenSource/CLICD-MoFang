@@ -1424,6 +1424,7 @@ func detectHostEnvironment() []HostEnvCheck {
 		commandCheck("genisoimage", "KVM cloud-init ISO 工具", false, "genisoimage", "xorriso/mkisofs 可替代"),
 		commandCheck("xorriso", "ISO 备用工具", false, "xorriso", ""),
 		commandCheck("smartctl", "硬盘健康检测", false, "smartctl", ""),
+		certbotCheck(),
 	}
 	checks = append(checks, HostEnvCheck{Key: "dev-kvm", Label: "/dev/kvm 硬件虚拟化", OK: fileExists("/dev/kvm"), Required: false, Detail: boolDetail(fileExists("/dev/kvm"))})
 	checks = append(checks, HostEnvCheck{Key: "ipv4-forward", Label: "IPv4 转发", OK: strings.TrimSpace(readFirstExistingFile("/proc/sys/net/ipv4/ip_forward")) == "1", Required: true, Detail: strings.TrimSpace(readFirstExistingFile("/proc/sys/net/ipv4/ip_forward"))})
@@ -1444,6 +1445,70 @@ func commandCheck(key, label string, required bool, cmd string, fallback string)
 		detail = fallback
 	}
 	return HostEnvCheck{Key: key, Label: label, OK: ok, Required: required, Detail: detail}
+}
+
+func certbotCheck() HostEnvCheck {
+	check := HostEnvCheck{Key: "certbot", Label: "Certbot 证书工具 >= 5.4", Required: false, Detail: "missing"}
+	if !commandExists("certbot") {
+		return check
+	}
+	detail := strings.TrimSpace(runCommandOutput(3*time.Second, "certbot", "--version"))
+	if detail == "" {
+		detail = strings.TrimSpace(runCommandOutput(3*time.Second, "sh", "-c", "certbot --version 2>&1 | head -n 1"))
+	}
+	if detail == "" {
+		detail = "installed, version unknown"
+	}
+	check.Detail = detail
+	version := extractCertbotVersion(detail)
+	check.OK = certbotVersionAtLeast(version, 5, 4)
+	if version == "" {
+		check.Detail = detail + " (version unknown, need >= 5.4)"
+	} else if !check.OK {
+		check.Detail = detail + " (need >= 5.4)"
+	}
+	return check
+}
+
+func extractCertbotVersion(output string) string {
+	for _, field := range strings.Fields(output) {
+		field = strings.Trim(field, "vV,;:()[]{}")
+		if field == "" || field[0] < '0' || field[0] > '9' {
+			continue
+		}
+		return field
+	}
+	return ""
+}
+
+func certbotVersionAtLeast(version string, minMajor, minMinor int) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	major, err := strconv.Atoi(numericPrefix(parts[0]))
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(numericPrefix(parts[1]))
+	if err != nil {
+		return false
+	}
+	if major != minMajor {
+		return major > minMajor
+	}
+	return minor >= minMinor
+}
+
+func numericPrefix(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func envCheckOK(checks []HostEnvCheck, key string) bool {
