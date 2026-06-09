@@ -5,7 +5,7 @@
 <h1 align="center">CLICD</h1>
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=111111">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white">
   <img alt="Vite" src="https://img.shields.io/badge/Vite-5-646CFF?style=flat-square&logo=vite&logoColor=white">
@@ -27,41 +27,11 @@
   <img alt="TLS" src="https://img.shields.io/badge/TLS-Let's_Encrypt-003A70?style=flat-square&logo=letsencrypt&logoColor=white">
 </p>
 
-CLICD is a lightweight virtualization management panel for LXC and KVM, featuring a web console, CLI management, batch operations, image management, NAT networking, IPv6 allocation, WebSSH, VNC access, resource controls, bandwidth limiting, and security alerting.
-It is designed for managing LXC containers and KVM virtual machines on VPS servers, and is particularly suitable for environments that require bulk provisioning and delegated access management through sub-user management links.
+CLICD is a lightweight virtualization management panel for LXC and KVM. It combines a web console, CLI tools, REST API, NAT/IPv6 networking, WebSSH/WebVNC access, resource quotas, traffic limits, snapshots, delegated sub-user access, and security alerts into a single deployable service.
 
-CLICD 是一个面向 LXC/KVM 的轻量虚拟化管理面板，提供 Web 控制台、CLI、批量任务、镜像管理、NAT 端口、IPv6 分配、WebSSH、VNC、资源限制、流量限制和安全告警能力。它适合用来管理小型 VPS 上的 LXC 容器和 KVM 虚拟机，也适合需要批量创建和分发子用户管理链接的场景。
+CLICD 是一个面向 LXC/KVM 的轻量虚拟化管理面板，集成 Web 控制台、CLI、REST API、NAT/IPv6 网络、WebSSH/WebVNC、资源配额、流量限制、快照、子用户授权和安全告警能力，适合 VPS 商家、实验室、开发者自建虚拟化节点以及需要批量开通容器的场景。
 
-## Features / 功能介绍
-
-### English
-1. Supports Ubuntu, Debian, Alpine, CentOS, Arch Linux, Fedora, Rocky Linux, and other operating system images. Images can be downloaded on demand through the image management interface. For hosts with limited resources, lightweight distributions such as Alpine are recommended.
-2. Supports WebSSH management, allowing users to access container terminals directly from the browser without manually copying SSH credentials.
-3. Supports NAT4 port quotas, port forwarding, and protocol restrictions, as well as public IPv6 allocation. IPv6 assignment requires the host machine to have a routable IPv6 prefix.
-4. Supports both inbound and outbound traffic limits. Containers are automatically powered off when configured limits are reached, preventing bandwidth overuse.
-5. Supports container expiration dates. Expired containers are automatically shut down, and delegated users lose access until an administrator extends the expiration period.
-6. Includes lightweight conntrack-based security monitoring. The system does not store full logs of normal connections, but generates audit alerts for suspicious activities such as port scanning, lateral scanning, brute-force attempts, SMTP abuse, UDP reflection attacks, cryptocurrency mining ports, and proxy/VPN/Tor usage.
-7. Supports delegated management links. Administrators can assign specific containers to sub-users, while ensuring that each user can only manage the containers explicitly authorized to them.
-8. Provides a REST API for automating the management of containers, tasks, images, networking, traffic controls, and security alerts.
-9. Supports operating entirely through the CLI. When the web console is not required, administrators can stop and disable the systemd service and launch CLI-only mode using `clicd cli --no-web`.
-
-### 中文
-1. 支持 Ubuntu、Debian、Alpine、CentOS、Arch Linux、Fedora、Rocky Linux 等系统镜像。镜像可以在镜像管理中按需下载；如果宿主机资源比较小，建议优先选择 Alpine 这类轻量镜像。
-2. 支持 WebSSH 管理，可以在浏览器里一键进入容器终端，不需要手动复制 SSH 密码。
-3. 支持设置 NAT4 端口数量、NAT 端口映射和协议限制，并支持分配公网 IPv6。IPv6 分配要求宿主机本身拥有可路由的 IPv6 地址段。
-4. 支持单向和双向网络流量限制。达到限制后容器会自动关机，避免流量超额。
-5. 支持设置容器有效期。到期后容器会自动关机，子用户无法继续操作，只有管理员重新设置延期日期后才能恢复使用。
-6. 内置基于 conntrack 的轻量安全告警。系统不会保存完整正常连接日志，但会对端口扫描、横向扫描、爆破倾向、SMTP 滥用、UDP 反射、挖矿端口、代理/VPN/Tor 等可疑行为生成告警并写入审计日志。
-7. 支持子用户管理链接，管理员可以把指定容器分发给拼车用户，子用户只能管理自己被授权的容器。
-8. 支持 API 接入，可以通过 API 完成容器、任务、镜像、端口、流量、安全告警等功能的自动化控制。
-9. 支持仅使用 CLI 管理。需要关闭 Web 控制台时，可以停止并禁用 systemd 服务，然后使用 `clicd cli --no-web` 进入命令行模式。
-
-## Technology Stack / 技术栈
-
-- Backend: Go, net/http, LXC, KVM/libvirt, cgroup v2, iptables, conntrack
-- Frontend: React, TypeScript, Vite, Tailwind CSS, lucide-react, xterm.js
-- Runtime: Linux, systemd, LXC, KVM/QEMU
-- Build: GitHub Actions, Node.js 20, Go 1.22
+![alt text](/img/image-1.png)
 
 ## Installation / 安装
 
@@ -77,9 +47,52 @@ One-click Uninstall / 一键卸载：
 curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh | sudo sh -s -- uninstall
 ```
 
-![alt text](/img/image.png)
-![alt text](/img/image-1.png)
+
+
+## Features / 功能介绍
+
+### English
+
+| Area | What CLICD provides |
+| --- | --- |
+| Virtualization | Manage LXC containers and KVM virtual machines from one panel, including create, reinstall, start, stop, restart, delete, password reset, expiry control, and batch actions. |
+| Images and templates | Built-in template and image management for Ubuntu, Debian, Alpine, CentOS, Arch Linux, Fedora, Rocky Linux, and other common distributions. Images can be enabled, disabled, downloaded, cancelled, or removed from cache. |
+| Networking | NAT4 port quotas, random available port allocation, TCP/UDP port mappings, public IPv4 pool management, IPv6 prefix detection, IPv6 status checks, and per-container IPv6 assignment. |
+| Resource control | CPU, memory, disk, swap, bandwidth usage, traffic reset, traffic limit, and resource limit management, with automatic shutdown behavior for expired or over-quota containers. |
+| Console access | Browser-based WebSSH and WebVNC ticket access, so users can open terminals or consoles without manually exchanging credentials. |
+| Snapshots | Snapshot overview, per-container snapshots, create/delete/restore operations, scheduled snapshots, and quota controls. |
+| Security | Conntrack-based security alerts for port scans, lateral scans, brute-force behavior, SMTP abuse, UDP reflection, mining ports, proxy/VPN/Tor usage, plus security logs, summaries, and configurable settings. |
+| Accounts and audit | Delegated sub-user links, sub-user password rotation, per-user container permissions, audit logs, login logs, and API key management. |
+| Automation | Versioned REST API under `/api/v1`, task queue endpoints, batch create/action endpoints, and a Mofang finance integration module packaged automatically by GitHub Actions. |
+| Operations | Dashboard statistics, host resource overview, routing overview, swap management, CLI-only mode, and release artifacts generated by GitHub Actions. |
+
+### 中文
+
+| 模块 | CLICD 提供的能力 |
+| --- | --- |
+| 虚拟化管理 | 在同一个面板里管理 LXC 容器和 KVM 虚拟机，支持创建、重装、开机、关机、重启、删除、重置密码、到期时间和批量操作。 |
+| 镜像与模板 | 内置模板和镜像管理，支持 Ubuntu、Debian、Alpine、CentOS、Arch Linux、Fedora、Rocky Linux 等常见发行版，镜像可按需下载、取消、启用、禁用和清理缓存。 |
+| 网络能力 | 支持 NAT4 端口配额、随机可用端口、TCP/UDP 端口映射、公网 IPv4 池管理、IPv6 前缀检测、IPv6 状态检查和容器级 IPv6 分配。 |
+| 资源限制 | 支持 CPU、内存、磁盘、Swap、带宽用量、流量重置、流量限制和资源限制管理；容器到期或超额后可自动关机，避免资源和流量失控。 |
+| 远程控制 | 内置 WebSSH 和 WebVNC 票据访问，用户可以直接在浏览器打开终端或控制台，不需要手动复制连接信息。 |
+| 快照能力 | 支持快照总览、容器快照、创建快照、删除快照、恢复快照、计划快照和快照配额。 |
+| 安全告警 | 基于 conntrack 做轻量安全检测，可识别端口扫描、横向扫描、爆破倾向、SMTP 滥用、UDP 反射、挖矿端口、代理/VPN/Tor 等风险，并提供安全日志、汇总和设置项。 |
+| 账号与审计 | 支持子用户管理链接、子用户密码轮换、按容器授权、操作日志、登录日志和 API Key 管理，适合分发给下游用户或拼车用户。 |
+| 自动化接入 | 全量接口统一使用 `/api/v1`，覆盖任务队列、容器、镜像、网络、流量、安全、批量创建和批量操作；同时提供魔方财务对接模块，并由 GitHub Actions 自动打包发布。 |
+| 运维入口 | 提供总览统计、主机资源、路由概览、Swap 管理、CLI-only 模式和 GitHub Actions 自动发布产物，便于在小型节点上长期维护。 |
+
+## Technology Stack / 技术栈
+
+- Backend: Go, net/http, LXC, KVM/libvirt, cgroup v2, iptables, conntrack
+- Frontend: React, TypeScript, Vite, Tailwind CSS, lucide-react, xterm.js
+- Runtime: Linux, systemd, LXC, KVM/QEMU
+- Build: GitHub Actions, Node.js 20, Go 1.24
+
+## Preview / 预览
 ![alt text](/img/image-2.png)
+![alt text](/img/image-3.png)
+![alt text](/img/image-4.png)
+![alt text](/img/image-5.png)
 
 
 ## Disclaimer/免责声明
