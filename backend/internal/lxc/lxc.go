@@ -218,24 +218,34 @@ func NewManager() *Manager {
 
 // ContainerConfig defines container creation parameters
 type ContainerConfig struct {
-	Name             string  `json:"name"`
-	Virtualization   string  `json:"virtualization,omitempty"`
-	TemplateID       string  `json:"template_id"`
-	VCPU             float64 `json:"vcpu"`
-	CPUPercent       int     `json:"cpu_percent"`
-	RAMMB            int     `json:"ram_mb"`
-	DiskGB           int     `json:"disk_gb"`
-	NetworkBWMbps    int     `json:"network_bw_mbps"`
-	MonthlyTrafficGB int     `json:"monthly_traffic_gb"`
-	TrafficMode      string  `json:"traffic_mode"`   // "total" or "in_out"
-	TrafficInGB      int     `json:"traffic_in_gb"`  // 0=unlimited
-	TrafficOutGB     int     `json:"traffic_out_gb"` // 0=unlimited
-	IOSpeedMBps      int     `json:"io_speed_mbps"`
-	ExtraPorts       []int   `json:"extra_ports"`
-	PortMappingCount int     `json:"port_mapping_count"`
-	SnapshotLimit    int     `json:"snapshot_limit"`
-	AssignIPv6       bool    `json:"assign_ipv6"`
-	ExpiresAt        string  `json:"expires_at"`
+	Name             string   `json:"name"`
+	Virtualization   string   `json:"virtualization,omitempty"`
+	TemplateID       string   `json:"template_id"`
+	VCPU             float64  `json:"vcpu"`
+	CPUPercent       int      `json:"cpu_percent"`
+	RAMMB            int      `json:"ram_mb"`
+	DiskGB           int      `json:"disk_gb"`
+	NetworkBWMbps    int      `json:"network_bw_mbps"`
+	MonthlyTrafficGB int      `json:"monthly_traffic_gb"`
+	TrafficMode      string   `json:"traffic_mode"`   // "total" or "in_out"
+	TrafficInGB      int      `json:"traffic_in_gb"`  // 0=unlimited
+	TrafficOutGB     int      `json:"traffic_out_gb"` // 0=unlimited
+	IOSpeedMBps      int      `json:"io_speed_mbps"`
+	ExtraPorts       []int    `json:"extra_ports"`
+	PortMappingCount int      `json:"port_mapping_count"`
+	AssignNAT        *bool    `json:"assign_nat,omitempty"`
+	SnapshotLimit    int      `json:"snapshot_limit"`
+	AssignIPv4       bool     `json:"assign_ipv4"`
+	IPv4Count        int      `json:"ipv4_count,omitempty"`
+	PublicIPv4s      []string `json:"public_ipv4s,omitempty"`
+	AssignIPv6       bool     `json:"assign_ipv6"`
+	IPv6Count        int      `json:"ipv6_count,omitempty"`
+	IPv6Addresses    []string `json:"ipv6_addresses,omitempty"`
+	ExpiresAt        string   `json:"expires_at"`
+}
+
+func (cfg ContainerConfig) WantsNAT() bool {
+	return cfg.AssignNAT == nil || *cfg.AssignNAT
 }
 
 // CreateContainer creates a new LXC container. Uses ct-{id} as LXC name internally.
@@ -244,8 +254,11 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	if tmpl == nil {
 		return fmt.Errorf("template not found: %s", cfg.TemplateID)
 	}
-	if cfg.PortMappingCount < 2 {
+	if cfg.WantsNAT() && cfg.PortMappingCount < 2 {
 		cfg.PortMappingCount = 2
+	} else if !cfg.WantsNAT() {
+		cfg.PortMappingCount = 0
+		cfg.ExtraPorts = nil
 	}
 	if cfg.SnapshotLimit <= 0 {
 		cfg.SnapshotLimit = config.DefaultSnapshotLimit
@@ -296,50 +309,64 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		return err
 	}
 
-	ipv6 := ""
-	ipv6PrefixLen := 0
-	ipv6Interface := ""
-	if cfg.AssignIPv6 {
-		assigned, prefixLen, iface, err := m.allocateIPv6ForContainer(id)
+	publicIPv4s, err := AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
+	if err != nil {
+		_ = m.cleanupContainerStorage(lxcName)
+		return err
+	}
+
+	ipv6Assignments := []config.IPv6Assignment{}
+	if cfg.AssignIPv6 || len(cfg.IPv6Addresses) > 0 {
+		assigned, err := m.allocateIPv6AssignmentsForContainer(id, cfg.IPv6Addresses, cfg.IPv6Count, true)
 		if err != nil {
 			_ = m.cleanupContainerStorage(lxcName)
 			return err
 		}
-		ipv6 = assigned
-		ipv6PrefixLen = prefixLen
-		ipv6Interface = iface
-		if err := m.applyIPv6Config(lxcName, ipv6); err != nil {
+		ipv6Assignments = assigned
+		if err := m.applyIPv6Config(lxcName, ipv6AssignmentAddresses(ipv6Assignments)...); err != nil {
 			_ = m.cleanupContainerStorage(lxcName)
 			return err
 		}
 	}
 
-	sshPort := config.AllocateSSHPort()
 	sshPassword := generateRandomString(16)
 
-	// Setup default port mappings (SSH only)
-	portMappings := SetupDefaultPortMappings(sshPort)
-	tempC := &config.Container{PortMappings: portMappings}
+	sshPort := 0
+	portMappings := []config.PortMapping{}
+	if cfg.WantsNAT() {
+		sshPort = config.AllocateSSHPort()
 
-	extraPorts := cfg.ExtraPorts
-	if len(extraPorts) == 0 && cfg.PortMappingCount > 1 {
-		extraPorts = allocateDefaultEqualPorts(tempC, cfg.PortMappingCount-1)
-	}
-	for _, containerPort := range extraPorts {
-		if containerPort <= 0 {
-			continue
+		// Setup default port mappings (SSH only)
+		portMappings = SetupDefaultPortMappings(sshPort)
+		defaultHostIP := defaultPortMappingHostIP(publicIPv4s)
+		if defaultHostIP != "" {
+			for i := range portMappings {
+				portMappings[i].HostIP = defaultHostIP
+			}
 		}
-		pm, err := normalizePortMapping(tempC, -1, config.PortMapping{
-			ContainerPort: containerPort,
-			HostPort:      containerPort,
-			Protocol:      "tcp",
-			Description:   fmt.Sprintf("Port-%d", containerPort),
-		})
-		if err != nil {
-			continue
+		tempC := &config.Container{ID: id, PublicIPv4s: publicIPv4s, PortMappings: portMappings}
+
+		extraPorts := cfg.ExtraPorts
+		if len(extraPorts) == 0 && cfg.PortMappingCount > 1 {
+			extraPorts = allocateDefaultEqualPorts(tempC, cfg.PortMappingCount-1)
 		}
-		tempC.PortMappings = append(tempC.PortMappings, pm)
-		portMappings = tempC.PortMappings
+		for _, containerPort := range extraPorts {
+			if containerPort <= 0 {
+				continue
+			}
+			pm, err := normalizePortMapping(tempC, -1, config.PortMapping{
+				ContainerPort: containerPort,
+				HostPort:      containerPort,
+				HostIP:        defaultHostIP,
+				Protocol:      "tcp",
+				Description:   fmt.Sprintf("Port-%d", containerPort),
+			})
+			if err != nil {
+				continue
+			}
+			tempC.PortMappings = append(tempC.PortMappings, pm)
+			portMappings = tempC.PortMappings
+		}
 	}
 
 	now := time.Now().Format("2006-01-02 15:04:05")
@@ -368,9 +395,8 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		IOSpeedMBps:      cfg.IOSpeedMBps,
 		Status:           "stopped",
 		IP:               "",
-		IPv6:             ipv6,
-		IPv6PrefixLen:    ipv6PrefixLen,
-		IPv6Interface:    ipv6Interface,
+		PublicIPv4s:      publicIPv4s,
+		IPv6Addresses:    ipv6Assignments,
 		VNCPort:          0,
 		SSHPort:          sshPort,
 		SSHPassword:      sshPassword,
@@ -380,13 +406,14 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		CreatedAt:        now,
 		ExpiresAt:        cfg.ExpiresAt,
 	}
+	container.NormalizeNetworkAssignments()
 	config.AddContainer(container)
 
 	// Pre-configure network and SSH in the rootfs before first boot.
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
 	m.preconfigureNetwork(rootfsPath, cfg.TemplateID)
-	if ipv6 != "" {
-		if err := installContainerIPv6Init(rootfsPath, ipv6); err != nil {
+	if len(ipv6Assignments) > 0 {
+		if err := installContainerIPv6Init(rootfsPath, ipv6AssignmentAddresses(ipv6Assignments)...); err != nil {
 			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", lxcName, err)
 		}
 	}
@@ -525,7 +552,7 @@ func (m *Manager) applyResourceLimits(lxcName string, cfg ContainerConfig) error
 	if err != nil {
 		return err
 	}
-	apparmorProfile, err := findAppArmorProfile()
+	apparmorProfile, err := appArmorProfileForTemplate(cfg.TemplateID)
 	if err != nil {
 		return err
 	}
@@ -940,6 +967,26 @@ func findAppArmorProfile() (string, error) {
 	return "", errors.New("required LXC AppArmor profile not loaded")
 }
 
+func appArmorProfileForTemplate(templateID string) (string, error) {
+	if systemdTemplateNeedsUnconfinedAppArmor(templateID) {
+		return "unconfined", nil
+	}
+	return findAppArmorProfile()
+}
+
+func systemdTemplateNeedsUnconfinedAppArmor(templateID string) bool {
+	id := strings.ToLower(strings.TrimSpace(templateID))
+	if id == "" || strings.Contains(id, "alpine") {
+		return false
+	}
+	for _, token := range []string{"ubuntu", "debian", "centos", "fedora", "rocky", "rockylinux", "archlinux"} {
+		if strings.Contains(id, token) {
+			return true
+		}
+	}
+	return false
+}
+
 func unprivilegedIDMap() (int, int, error) {
 	if err := ensureSubIDRange("/etc/subuid", "root", 100000, 65536); err != nil {
 		return 0, 0, err
@@ -1197,27 +1244,31 @@ func (m *Manager) StartContainer(id int) error {
 			NetworkBWMbps:    c.NetworkBWMbps,
 			MonthlyTrafficGB: c.MonthlyTrafficGB,
 			IOSpeedMBps:      c.IOSpeedMBps,
-			AssignIPv6:       c.IPv6 != "",
+			AssignIPv6:       c.IPv6 != "" || len(c.IPv6Addresses) > 0,
 			ExpiresAt:        c.ExpiresAt,
 		}); err != nil {
 			return err
 		}
 	}
-	if c.IPv6 != "" {
-		if err := m.applyIPv6Config(lxcName, c.IPv6); err != nil {
+	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
+		c.NormalizeNetworkAssignments()
+		if err := m.applyIPv6Config(lxcName, c.IPv6AddressStrings()...); err != nil {
 			return err
 		}
 		if err := m.ApplyIPv6(id); err != nil {
 			return err
 		}
 	}
+	EnsureAssignedPublicIPv4s(c.PublicIPv4s)
 
-	logFile := filepath.Join(os.TempDir(), "clicd-"+lxcName+"-start.log")
-	os.Remove(logFile)
-	cmd := exec.Command("lxc-start", "-n", lxcName, "-d", "--logfile", logFile, "--logpriority", "DEBUG")
-	output, err := cmd.CombinedOutput()
+	logFile, consoleLog, output, err := m.startLXCContainerDaemon(lxcName)
 	if err != nil {
-		return fmt.Errorf("failed to start container: %v, output: %s, lxc log: %s", err, string(output), tailFile(logFile, 80))
+		config.UpdateContainerStatus(id, "stopped")
+		return fmt.Errorf("failed to start container: %v, output: %s, lxc log: %s, console: %s", err, string(output), tailFile(logFile, 80), tailFile(consoleLog, 80))
+	}
+	if err := m.waitForLXCStartup(lxcName, logFile, consoleLog); err != nil {
+		config.UpdateContainerStatus(id, "stopped")
+		return err
 	}
 
 	config.UpdateContainerStatus(id, "running")
@@ -1262,7 +1313,7 @@ func (m *Manager) StartContainer(id int) error {
 	if err := m.ApplyPortMappings(id); err != nil {
 		fmt.Printf("Warning: failed to apply port mappings: %v\n", err)
 	}
-	if c.IPv6 != "" {
+	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.ApplyIPv6(id); err != nil {
 			fmt.Printf("Warning: failed to apply IPv6 routing for %s: %v\n", lxcName, err)
 		}
@@ -1270,6 +1321,41 @@ func (m *Manager) StartContainer(id int) error {
 
 	fmt.Printf("Container %d (%s) started, IP: %s\n", id, c.Name, ip)
 	return nil
+}
+
+func (m *Manager) startLXCContainerDaemon(lxcName string) (string, string, []byte, error) {
+	logFile := filepath.Join(os.TempDir(), "clicd-"+lxcName+"-start.log")
+	consoleLog := filepath.Join(os.TempDir(), "clicd-"+lxcName+"-console.log")
+	os.Remove(logFile)
+	os.Remove(consoleLog)
+	cmd := exec.Command("lxc-start", "-n", lxcName, "-d", "--logfile", logFile, "--logpriority", "DEBUG", "--console-log", consoleLog)
+	output, err := cmd.CombinedOutput()
+	return logFile, consoleLog, output, err
+}
+
+func (m *Manager) waitForLXCStartup(lxcName, logFile, consoleLog string) error {
+	runningChecks := 0
+	lastStatus := "unknown"
+	for retry := 0; retry < 10; retry++ {
+		time.Sleep(1 * time.Second)
+		status, err := m.GetContainerStatus(lxcName)
+		if err != nil {
+			lastStatus = "unknown"
+			continue
+		}
+		lastStatus = status
+		if status == "running" {
+			runningChecks++
+			if runningChecks >= 3 {
+				return nil
+			}
+			continue
+		}
+		if runningChecks > 0 || retry >= 1 {
+			break
+		}
+	}
+	return fmt.Errorf("container exited immediately after start (status: %s), lxc log: %s, console: %s", lastStatus, tailFile(logFile, 80), tailFile(consoleLog, 80))
 }
 
 // applyBandwidthLimit applies tc-based bandwidth limit on container's veth interface
@@ -1553,8 +1639,17 @@ func (m *Manager) DestroyContainer(id int) error {
 		return fmt.Errorf("container not found: %d", id)
 	}
 	lxcName := c.LxcName()
-	if c.IPv6 != "" && c.IPv6Interface != "" {
-		removeHostIPv6Routing(c.IPv6, c.IPv6Interface)
+	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
+		c.NormalizeNetworkAssignments()
+		for _, assignment := range c.IPv6Addresses {
+			uplink := assignment.Interface
+			if uplink == "" {
+				uplink = c.IPv6Interface
+			}
+			if uplink != "" {
+				removeHostIPv6Routing(assignment.Address, uplink)
+			}
+		}
 	}
 
 	if err := m.StopContainer(id); err != nil {
@@ -1799,6 +1894,11 @@ install_sshd() {
 	return 1
 }
 
+ensure_sshd_runtime_dir() {
+	mkdir -p /run/sshd /var/run/sshd
+	chmod 0755 /run/sshd /var/run/sshd 2>/dev/null || true
+}
+
 set_sshd_option() {
 	key="$1"
 	value="$2"
@@ -1825,7 +1925,8 @@ set_sshd_option() {
 
 install_sshd || exit 30
 
-mkdir -p /run/sshd /var/run/sshd /etc/ssh /etc/ssh/sshd_config.d
+mkdir -p /etc/ssh /etc/ssh/sshd_config.d
+ensure_sshd_runtime_dir
 ssh-keygen -A >/dev/null 2>&1 || true
 
 cat >/etc/ssh/sshd_config.d/99-clicd.conf <<'EOF'
@@ -1858,6 +1959,7 @@ if command -v chkconfig >/dev/null 2>&1; then
 fi
 
 SSHD_BIN="$(sshd_path)" || exit 32
+ensure_sshd_runtime_dir
 "$SSHD_BIN" -t -f /etc/ssh/sshd_config >/tmp/clicd-sshd-test.log 2>&1 || {
 	cat /tmp/clicd-sshd-test.log
 	exit 32
@@ -1872,6 +1974,7 @@ if command -v systemctl >/dev/null 2>&1; then
 	systemctl stop ssh.socket 2>/dev/null || true
 	systemctl disable ssh.socket 2>/dev/null || true
 fi
+ensure_sshd_runtime_dir
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
 	systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
 fi
@@ -1882,9 +1985,22 @@ service ssh restart >/dev/null 2>&1 ||
 	/etc/init.d/sshd restart >/dev/null 2>&1 ||
 	true
 
+ensure_sshd_runtime_dir
+
+for i in 1 2 3 4 5; do
+	if (ss -ltn 2>/dev/null || netstat -tln 2>/dev/null) | grep -Eq '(^|[[:space:]])[^[:space:]]*:22[[:space:]]'; then
+		exit 0
+	fi
+	if pgrep -x sshd >/dev/null 2>&1; then
+		exit 0
+	fi
+	sleep 1
+done
+
 if ! (ss -ltn 2>/dev/null || netstat -tln 2>/dev/null) | grep -Eq '(^|[[:space:]])[^[:space:]]*:22[[:space:]]'; then
 	pkill -x sshd >/dev/null 2>&1 || killall sshd >/dev/null 2>&1 || true
 	rm -f /run/sshd.pid /var/run/sshd.pid
+	ensure_sshd_runtime_dir
 	"$SSHD_BIN" -f /etc/ssh/sshd_config >/dev/null 2>&1 || exit 32
 fi
 
@@ -2425,14 +2541,15 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 		NetworkBWMbps:    c.NetworkBWMbps,
 		MonthlyTrafficGB: c.MonthlyTrafficGB,
 		IOSpeedMBps:      c.IOSpeedMBps,
-		AssignIPv6:       c.IPv6 != "",
+		AssignIPv6:       c.IPv6 != "" || len(c.IPv6Addresses) > 0,
 		ExpiresAt:        c.ExpiresAt,
 	}
 	if err := m.applyResourceLimits(lxcName, cfg); err != nil {
 		return err
 	}
-	if c.IPv6 != "" {
-		if err := m.applyIPv6Config(lxcName, c.IPv6); err != nil {
+	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
+		c.NormalizeNetworkAssignments()
+		if err := m.applyIPv6Config(lxcName, c.IPv6AddressStrings()...); err != nil {
 			return err
 		}
 	}
@@ -2440,8 +2557,8 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	// Set root password and pre-configure network/SSH via chroot.
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
 	m.preconfigureNetwork(rootfsPath, templateID)
-	if c.IPv6 != "" {
-		if err := installContainerIPv6Init(rootfsPath, c.IPv6); err != nil {
+	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
+		if err := installContainerIPv6Init(rootfsPath, c.IPv6AddressStrings()...); err != nil {
 			fmt.Printf("Warning: failed to install IPv6 init in %s after reinstall: %v\n", lxcName, err)
 		}
 	}
@@ -2470,14 +2587,17 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 		config.SaveConfig()
 		return err
 	}
-	logFile := filepath.Join(os.TempDir(), "clicd-"+lxcName+"-start.log")
-	os.Remove(logFile)
-	startCmd := exec.Command("lxc-start", "-n", lxcName, "-d", "--logfile", logFile, "--logpriority", "DEBUG")
-	if output, err := startCmd.CombinedOutput(); err != nil {
+	logFile, consoleLog, output, err := m.startLXCContainerDaemon(lxcName)
+	if err != nil {
 		fmt.Printf("Warning: failed to start container after reinstall: %v\n", err)
 		c.Status = "stopped"
 		config.SaveConfig()
-		return fmt.Errorf("reinstalled but failed to start: %v, output: %s, lxc log: %s", err, string(output), tailFile(logFile, 80))
+		return fmt.Errorf("reinstalled but failed to start: %v, output: %s, lxc log: %s, console: %s", err, string(output), tailFile(logFile, 80), tailFile(consoleLog, 80))
+	}
+	if err := m.waitForLXCStartup(lxcName, logFile, consoleLog); err != nil {
+		c.Status = "stopped"
+		config.SaveConfig()
+		return fmt.Errorf("reinstalled but container did not stay running: %v", err)
 	}
 
 	// Wait for network and install SSH
@@ -2503,7 +2623,7 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	if c.NetworkBWMbps > 0 {
 		m.applyBandwidthLimit(c.LxcName(), c.NetworkBWMbps)
 	}
-	if c.IPv6 != "" {
+	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.ApplyIPv6(id); err != nil {
 			fmt.Printf("Warning: failed to apply IPv6 after reinstall: %v\n", err)
 		}

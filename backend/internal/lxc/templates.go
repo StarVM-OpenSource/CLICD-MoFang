@@ -46,17 +46,17 @@ func GetTemplates() []Template {
 		},
 		{
 			ID: "archlinux-current", Name: "Arch Linux",
-			Distro: "archlinux", Release: "current", Arch: "amd64", Variant: "cloud",
+			Distro: "archlinux", Release: "current", Arch: "amd64",
 			Description: "Arch Linux (Rolling)",
 		},
 		{
 			ID: "fedora-44", Name: "Fedora 44",
-			Distro: "fedora", Release: "44", Arch: "amd64", Variant: "cloud",
+			Distro: "fedora", Release: "44", Arch: "amd64",
 			Description: "Fedora 44",
 		},
 		{
 			ID: "rockylinux-10", Name: "Rocky Linux 10",
-			Distro: "rockylinux", Release: "10", Arch: "amd64", Variant: "cloud",
+			Distro: "rockylinux", Release: "10", Arch: "amd64",
 			Description: "Rocky Linux 10",
 		},
 	}

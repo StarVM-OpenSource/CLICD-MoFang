@@ -245,6 +245,7 @@ const exact: Record<string, string> = {
   '暂无登录记录': 'No login records',
   '暂无 NAT4 端口映射': 'No NAT4 port mappings',
   '暂无 IPv6 地址分配': 'No IPv6 assignments',
+  '暂无可分配 IPv6 前缀': 'No allocatable IPv6 prefixes',
   '暂无镜像': 'No images',
   '暂无数据': 'No data',
   '容器': 'Container',
@@ -327,6 +328,7 @@ const exact: Record<string, string> = {
   '地址': 'Address',
   '前缀': 'Prefix',
   '出口网卡': 'Uplink',
+  '宿主地址': 'Host Address',
   '协议': 'Protocol',
   '说明': 'Description',
   '端口': 'Port',
@@ -334,6 +336,12 @@ const exact: Record<string, string> = {
   '宿主机端口': 'Host Port',
   '容器 IPv4': 'Container IPv4',
   'IPv6 地址': 'IPv6 Address',
+  'IPv6 前缀': 'IPv6 Prefix',
+  '可分配 IPv6 前缀': 'Allocatable IPv6 Prefixes',
+  '编辑前缀': 'Edit Prefixes',
+  '添加 IPv6 前缀': 'Add IPv6 Prefix',
+  '保存前缀': 'Save Prefixes',
+  '服务商面板里的额外 IPv6 段不会自动出现在网卡里，请把可分配的前缀手动填入这里，例如 2401:b60:26:5e::2/64。': 'Extra IPv6 prefixes from the provider panel will not automatically appear on the NIC. Enter allocatable prefixes here manually, for example 2401:b60:26:5e::2/64.',
   'LXC 名称': 'LXC Name',
   '快照时间': 'Snapshot Time',
   '删除快照': 'Delete Snapshot',
@@ -730,6 +738,10 @@ const exact: Record<string, string> = {
   '厂商': 'Vendor',
   '型号/序列号': 'Model / Serial',
   '未检测到硬盘': 'No disks detected',
+  '虚拟磁盘': 'Virtual Disk',
+  '不支持': 'Unsupported',
+  '虚拟磁盘，真实 SMART/寿命/通电数据需在物理宿主机查看': 'Virtual disk. Real SMART, lifetime, and power-on data must be checked on the physical host.',
+  '虚拟Disk，真实 SMART/Lifetime/Power-on数据需在物理宿主机View': 'Virtual disk. Real SMART, lifetime, and power-on data must be checked on the physical host.',
   '型号': 'Model',
   '挂载点': 'Mount Point',
   '寿命': 'Lifetime',
@@ -782,10 +794,16 @@ const artifactPatterns: RegExp[] = [
   /实时\s*Status/,
   /Create\s*Time/,
   /长期\s*Valid/,
+  /虚拟Disk/,
+  /宿主机View/,
+  /SMART\/Lifetime\/Power-on数据/,
 ]
 
 const replacements: Array<[RegExp, string]> = [
   [/Back\s*列表/g, 'Back to list'],
+  [/虚拟Disk，真实 SMART\/Lifetime\/Power-on数据需在物理宿主机View/g, 'Virtual disk. Real SMART, lifetime, and power-on data must be checked on the physical host.'],
+  [/虚拟\s*Disk，真实 SMART\/Lifetime\/Power-on数据需在物理宿主机\s*View/g, 'Virtual disk. Real SMART, lifetime, and power-on data must be checked on the physical host.'],
+  [/真实 SMART\/Lifetime\/Power-on数据需在物理宿主机View/g, 'Real SMART, lifetime, and power-on data must be checked on the physical host'],
   [/Search\s*名称、ID、UUID、IP/g, 'Search name, ID, UUID, IP'],
   [/All\s*类型/g, 'All types'],
   [/All\s*系统/g, 'All systems'],
@@ -817,6 +835,7 @@ const replacements: Array<[RegExp, string]> = [
   [/告警列表\s*\((\d+)\)/g, 'Alert List ($1)'],
   [/共\s*(\d+)\s*个\s*Container/g, 'Total $1 containers'],
   [/共\s*(\d+)\s*个\s*容器/g, 'Total $1 containers'],
+  [/(\d+)\s*个前缀，(\d+)\s*个地址已分配/g, '$1 prefixes, $2 addresses assigned'],
   [/共\s*(\d+)\s*条/g, 'Total $1'],
   [/共\s*(\d+)\s*个/g, 'Total $1 items'],
   [/，筛选后\s*(\d+)\s*个/g, ', filtered $1 items'],
@@ -898,6 +917,11 @@ export function shouldTranslateText(value: string): boolean {
 
 function cleanupTranslatedText(value: string): string {
   return value
+    .replace(/虚拟Disk，真实 SMART\/Lifetime\/Power-on数据需在物理宿主机View/g, 'Virtual disk. Real SMART, lifetime, and power-on data must be checked on the physical host.')
+    .replace(/Virtual Disk，真实 SMART\/Lifetime\/Power-on数据需在物理Host View/g, 'Virtual disk. Real SMART, lifetime, and power-on data must be checked on the physical host.')
+    .replace(/Virtual Disk，真实 SMART\/Lifetime\/Power-on数据需在物理宿主机View/g, 'Virtual disk. Real SMART, lifetime, and power-on data must be checked on the physical host.')
+    .replace(/虚拟\s*Disk/g, 'Virtual disk')
+    .replace(/宿主机\s*View/g, 'physical host')
     .replace(/Back\s*List/g, 'Back to list')
     .replace(/Container\s*List/g, 'Container List')
     .replace(/Snapshot\s*List/g, 'Snapshot List')

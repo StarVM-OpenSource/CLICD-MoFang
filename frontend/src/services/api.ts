@@ -40,8 +40,22 @@ export type ContainerIdentifier = number | string
 export interface PortMapping {
   container_port: number
   host_port: number
+  host_ip?: string
   protocol: string
   description: string
+}
+
+export interface PublicIPv4Assignment {
+  address: string
+  interface?: string
+  prefix_len?: number
+  gateway?: string
+}
+
+export interface IPv6Assignment {
+  address: string
+  prefix_len: number
+  interface?: string
 }
 
 export interface Container {
@@ -64,9 +78,11 @@ export interface Container {
   io_speed_mbps: number
   status: string
   ip: string
+  public_ipv4s?: PublicIPv4Assignment[]
   ipv6: string
   ipv6_prefix_len: number
   ipv6_interface: string
+  ipv6_addresses?: IPv6Assignment[]
   vnc_port: number
   ssh_port: number
   ssh_password: string
@@ -114,8 +130,14 @@ export interface CreateContainerRequest {
   io_speed_mbps: number
   extra_ports: number[]
   port_mapping_count: number
+  assign_nat?: boolean
   snapshot_limit: number
+  assign_ipv4?: boolean
+  ipv4_count?: number
+  public_ipv4s?: string[]
   assign_ipv6: boolean
+  ipv6_count?: number
+  ipv6_addresses?: string[]
   expires_at: string
 }
 
@@ -134,6 +156,17 @@ export interface IPv6Status {
   reachable: boolean
   reason: string
   prefixes: IPv6PrefixInfo[]
+}
+
+export interface PublicIPv4Info {
+  interface: string
+  address: string
+  prefix: string
+  prefix_len?: number
+  subnet_mask?: string
+  gateway?: string
+  is_tunnel?: boolean
+  source?: string
 }
 
 export interface IPv4PrefixInfo {
@@ -163,6 +196,7 @@ export interface HostInfo {
     tx_bps: number
     public_ipv4?: string
     public_ipv4_interface?: string
+    public_ipv4_addresses?: PublicIPv4Info[]
     public_ipv6?: string
     public_ipv6_interface?: string
     ipv6_prefixes?: IPv6PrefixInfo[]
@@ -207,6 +241,7 @@ export interface HostProbeReport {
     serial: string
     size_bytes: number
     type: string
+    virtual?: boolean
     rotational: boolean
     mountpoints: string[]
     health: string
@@ -453,10 +488,22 @@ export interface NAT4Route {
   lxc_name: string
   status: string
   ip: string
+  host_ip: string
   host_port: number
   container_port: number
   protocol: string
   description: string
+}
+
+export interface IPv4Route {
+  container_id: number
+  container_name: string
+  lxc_name: string
+  status: string
+  address: string
+  interface: string
+  prefix_len?: number
+  gateway?: string
 }
 
 export interface IPv6Route {
@@ -471,14 +518,36 @@ export interface IPv6Route {
 
 export interface RoutingInfo {
   nat4: RouteCapacity
+  ipv4: RouteCapacity
   ipv6: RouteCapacity
+  host_public_ipv4?: PublicIPv4Info
+  public_ipv4_addresses: PublicIPv4Info[]
+  ipv4_assignments: IPv4Route[]
   nat4_mappings: NAT4Route[]
   ipv6_assignments: IPv6Route[]
   ipv6_prefixes: IPv6PrefixInfo[]
 }
 
+export interface PublicIPv4ScanResult extends PublicIPv4Info {
+  status: string
+  usable: boolean
+  reason: string
+}
+
 export const getRoutingInfo = () =>
   api.get<APIResponse<RoutingInfo>>('/routing')
+
+export const updateRoutingPools = (payload: { items?: PublicIPv4Info[]; ipv6_prefixes?: IPv6PrefixInfo[] }) =>
+  api.put<APIResponse<RoutingInfo>>('/routing', payload)
+
+export const updateRoutingIPv4Pool = (items: PublicIPv4Info[]) =>
+  updateRoutingPools({ items })
+
+export const updateRoutingIPv6Prefixes = (ipv6_prefixes: IPv6PrefixInfo[]) =>
+  updateRoutingPools({ ipv6_prefixes })
+
+export const scanRoutingIPv4Segment = (payload: { cidr: string; interface: string; gateway: string; verify: boolean; limit?: number }) =>
+  api.post<APIResponse<PublicIPv4ScanResult[]>>('/routing/ipv4-scan', payload)
 
 // Templates
 export const getTemplates = () =>

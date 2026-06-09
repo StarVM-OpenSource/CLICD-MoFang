@@ -364,8 +364,11 @@ func (m *Manager) CreateContainer(cfg lxc.ContainerConfig) error {
 	if cfg.VCPU < 1 || cfg.VCPU != float64(int(cfg.VCPU)) {
 		return fmt.Errorf("KVM vCPU must be a whole number and at least 1")
 	}
-	if cfg.PortMappingCount < 2 {
+	if cfg.WantsNAT() && cfg.PortMappingCount < 2 {
 		cfg.PortMappingCount = 2
+	} else if !cfg.WantsNAT() {
+		cfg.PortMappingCount = 0
+		cfg.ExtraPorts = nil
 	}
 	if cfg.SnapshotLimit <= 0 {
 		cfg.SnapshotLimit = config.DefaultSnapshotLimit
@@ -403,18 +406,21 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	seedPath := filepath.Join(m.instanceDir(vmName), "seed.iso")
 	mac := randomMAC()
 	sshPassword := generateRandomString(16)
-	ipv6 := ""
-	ipv6PrefixLen := 0
-	ipv6Interface := ""
-	if cfg.AssignIPv6 {
-		assigned, prefixLen, iface, err := m.allocateIPv6ForContainer(id)
+	publicIPv4s, err := lxc.AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
+	if err != nil {
+		return nil, err
+	}
+
+	ipv6Assignments := []config.IPv6Assignment{}
+	if cfg.AssignIPv6 || len(cfg.IPv6Addresses) > 0 {
+		assigned, err := m.allocateIPv6AssignmentsForContainer(id, cfg.IPv6Addresses, cfg.IPv6Count, true)
 		if err != nil {
 			return nil, err
 		}
-		ipv6 = assigned
-		ipv6PrefixLen = prefixLen
-		ipv6Interface = iface
+		ipv6Assignments = assigned
 	}
+	ipv6List := configIPv6AssignmentAddresses(ipv6Assignments)
+	defaultHostIP := lxc.DefaultPortMappingHostIP(publicIPv4s)
 
 	var xml string
 	winAdminPassword := ""
@@ -433,7 +439,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		}
 		winAdminPassword = generateWindowsPassword()
 		unattendPath := filepath.Join(m.instanceDir(vmName), "unattend.iso")
-		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, ipv6); err != nil {
+		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, ipv6List); err != nil {
 			return nil, err
 		}
 		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps)
@@ -449,7 +455,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
 			return nil, err
 		}
-		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, mac, ipv6, *image); err != nil {
+		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, mac, ipv6List, *image); err != nil {
 			return nil, err
 		}
 		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps, image.Desktop != "")
@@ -465,20 +471,26 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 
 	sshPort := 0
 	portMappings := []config.PortMapping{}
-	if allocatePorts {
+	if allocatePorts && cfg.WantsNAT() {
 		sshPort = config.AllocateSSHPort()
 		if IsWindowsImage(image.ID) {
 			// Windows: RDP (3389) instead of SSH (22)
 			portMappings = []config.PortMapping{{
 				ContainerPort: 3389,
 				HostPort:      sshPort,
+				HostIP:        defaultHostIP,
 				Protocol:      "tcp",
 				Description:   "RDP",
 			}}
 		} else {
 			portMappings = lxc.SetupDefaultPortMappings(sshPort)
+			if defaultHostIP != "" {
+				for i := range portMappings {
+					portMappings[i].HostIP = defaultHostIP
+				}
+			}
 		}
-		tempC := &config.Container{PortMappings: portMappings}
+		tempC := &config.Container{ID: id, PublicIPv4s: publicIPv4s, PortMappings: portMappings}
 		extraPorts := cfg.ExtraPorts
 		if len(extraPorts) == 0 && cfg.PortMappingCount > 1 {
 			extraPorts = allocateDefaultEqualPorts(tempC, cfg.PortMappingCount-1)
@@ -490,6 +502,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 			tempC.PortMappings = append(tempC.PortMappings, config.PortMapping{
 				ContainerPort: port,
 				HostPort:      port,
+				HostIP:        defaultHostIP,
 				Protocol:      "tcp",
 				Description:   fmt.Sprintf("Port-%d", port),
 			})
@@ -502,7 +515,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	if trafficMode == "" {
 		trafficMode = "total"
 	}
-	return &config.Container{
+	container := &config.Container{
 		ID:               id,
 		UUID:             config.NewContainerUUID(),
 		Name:             cfg.Name,
@@ -521,9 +534,8 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		TrafficOutGB:     cfg.TrafficOutGB,
 		TrafficResetDate: now[:7],
 		IOSpeedMBps:      cfg.IOSpeedMBps,
-		IPv6:             ipv6,
-		IPv6PrefixLen:    ipv6PrefixLen,
-		IPv6Interface:    ipv6Interface,
+		PublicIPv4s:      publicIPv4s,
+		IPv6Addresses:    ipv6Assignments,
 		Status:           "stopped",
 		SSHPort:          sshPort,
 		SSHPassword: func() string {
@@ -537,7 +549,9 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		SnapshotLimit:    config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
 		CreatedAt:        now,
 		ExpiresAt:        cfg.ExpiresAt,
-	}, nil
+	}
+	container.NormalizeNetworkAssignments()
+	return container, nil
 }
 
 func (m *Manager) StartContainer(id int) error {
@@ -548,6 +562,7 @@ func (m *Manager) StartContainer(id int) error {
 	if err := m.validateHost(IsWindowsImage(c.Template)); err != nil {
 		return err
 	}
+	lxc.EnsureAssignedPublicIPv4s(c.PublicIPv4s)
 	name := c.VirshName()
 	if err := m.ensureDomainDefinition(c); err != nil {
 		fmt.Printf("Warning: failed to refresh KVM domain definition for %s: %v\n", name, err)
@@ -598,7 +613,7 @@ func (m *Manager) StartContainer(id int) error {
 			return err
 		}
 	}
-	if c.IPv6 != "" {
+	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.applyIPv6Runtime(c); err != nil {
 			return err
 		}
@@ -1559,7 +1574,7 @@ func createEmptyDisk(target string, diskGB int) error {
 	return nil
 }
 
-func createWindowsUnattendISO(target, hostname, adminPassword, ipv6 string) error {
+func createWindowsUnattendISO(target, hostname, adminPassword string, ipv6s []string) error {
 	tool := firstAvailableCommand("genisoimage", "mkisofs", "xorriso")
 	if tool == "" {
 		return fmt.Errorf("one of genisoimage, mkisofs, xorriso is required for Windows unattended setup")
@@ -1585,13 +1600,13 @@ func createWindowsUnattendISO(target, hostname, adminPassword, ipv6 string) erro
 	if err := os.WriteFile(filepath.Join(setupScriptsDir, "SetupComplete.cmd"), []byte(windowsSetupCompleteCMD()), 0600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(clicdDir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6)), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(clicdDir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s)), 0600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "SetupComplete.cmd"), []byte(windowsSetupCompleteCMD()), 0600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6)), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s)), 0600); err != nil {
 		return err
 	}
 	_ = os.Remove(target)
@@ -1701,7 +1716,7 @@ exit /b 0
 `
 }
 
-func windowsFirstLogonPowerShell(adminPassword, ipv6 string) string {
+func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string) string {
 	commands := []string{
 		"$ErrorActionPreference='Continue'",
 		"$ProgressPreference='SilentlyContinue'",
@@ -1731,9 +1746,10 @@ func windowsFirstLogonPowerShell(adminPassword, ipv6 string) string {
 		"Get-Service QEMU-GA,qemu-ga -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic",
 		"Start-Service QEMU-GA,qemu-ga -ErrorAction SilentlyContinue",
 	}
-	if strings.TrimSpace(ipv6) != "" {
+	ipv6s = normalizeKVMIPv6List(ipv6s)
+	if len(ipv6s) > 0 {
 		commands = append(commands,
-			windowsIPv6PowerShell(strings.TrimSpace(ipv6)),
+			windowsIPv6PowerShell(ipv6s),
 		)
 	}
 	commands = append(commands,
@@ -1743,17 +1759,24 @@ func windowsFirstLogonPowerShell(adminPassword, ipv6 string) string {
 	return strings.Join(commands, "\r\n") + "\r\n"
 }
 
-func windowsIPv6PowerShell(ipv6 string) string {
-	ipv6 = strings.TrimSpace(ipv6)
-	if ipv6 == "" {
+func windowsIPv6PowerShell(ipv6s []string) string {
+	ipv6s = normalizeKVMIPv6List(ipv6s)
+	if len(ipv6s) == 0 {
 		return ""
 	}
+	quoted := make([]string, 0, len(ipv6s))
+	for _, ipv6 := range ipv6s {
+		quoted = append(quoted, "'"+strings.ReplaceAll(ipv6, "'", "''")+"'")
+	}
 	return strings.Join([]string{
+		"$clicdIPv6=@(" + strings.Join(quoted, ",") + ")",
 		"$iface=$null",
 		"for ($i=0; $i -lt 60 -and -not $iface; $i++) { $iface=Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Sort-Object ifIndex | Select-Object -First 1; if (-not $iface) { Start-Sleep -Seconds 5 } }",
 		"if ($iface) {",
-		"  Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq '" + ipv6 + "' } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",
-		"  New-NetIPAddress -IPAddress '" + ipv6 + "' -PrefixLength 128 -InterfaceIndex $iface.ifIndex -SkipAsSource:$false -ErrorAction SilentlyContinue | Out-Null",
+		"  foreach ($ip in $clicdIPv6) {",
+		"    Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",
+		"    New-NetIPAddress -IPAddress $ip -PrefixLength 128 -InterfaceIndex $iface.ifIndex -SkipAsSource:$false -ErrorAction SilentlyContinue | Out-Null",
+		"  }",
 		"  Get-NetRoute -InterfaceIndex $iface.ifIndex -DestinationPrefix '::/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue",
 		"  New-NetRoute -DestinationPrefix '::/0' -InterfaceIndex $iface.ifIndex -NextHop '" + ipv6GatewayLinkLocal + "' -RouteMetric 100 -ErrorAction SilentlyContinue | Out-Null",
 		"  Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @('2001:4860:4860::8888','2606:4700:4700::1111') -ErrorAction SilentlyContinue",
@@ -1765,13 +1788,14 @@ func shellQuoteWindows(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 }
 
-func createSeedISO(seedPath, instanceID, hostname, password, mac, ipv6 string, image Image) error {
+func createSeedISO(seedPath, instanceID, hostname, password, mac string, ipv6s []string, image Image) error {
 	guestSetup := kvmSSHSetupScript(password)
 	if desktopSetup := kvmDesktopSetupScript(image); desktopSetup != "" {
 		guestSetup += "\n" + desktopSetup
 	}
-	if strings.TrimSpace(ipv6) != "" {
-		guestSetup += "\n" + kvmIPv6SetupScript(ipv6)
+	ipv6s = normalizeKVMIPv6List(ipv6s)
+	if len(ipv6s) > 0 {
+		guestSetup += "\n" + kvmIPv6SetupScript(ipv6s)
 	}
 	setupScript := indentScript(guestSetup, 4)
 	userData := fmt.Sprintf(`#cloud-config
@@ -1795,15 +1819,19 @@ runcmd:
 `, hostname, password, setupScript)
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", instanceID, hostname)
 	ipv6Block := ""
-	if strings.TrimSpace(ipv6) != "" {
+	if len(ipv6s) > 0 {
+		addressLines := make([]string, 0, len(ipv6s))
+		for _, ipv6 := range ipv6s {
+			addressLines = append(addressLines, fmt.Sprintf("        - %s/128", ipv6))
+		}
 		ipv6Block = fmt.Sprintf(`
       addresses:
-        - %s/128
+%s
       routes:
         - to: default
           via: %s
           on-link: true
-          metric: 100`, ipv6, ipv6GatewayLinkLocal)
+          metric: 100`, strings.Join(addressLines, "\n"), ipv6GatewayLinkLocal)
 	}
 	networkConfig := fmt.Sprintf(`version: 2
 ethernets:
@@ -1832,6 +1860,42 @@ ethernets:
 	}
 	_ = os.Chmod(seedPath, 0644)
 	return nil
+}
+
+func configIPv6AssignmentAddresses(assignments []config.IPv6Assignment) []string {
+	values := make([]string, 0, len(assignments))
+	for _, item := range assignments {
+		if strings.TrimSpace(item.Address) != "" {
+			values = append(values, strings.TrimSpace(item.Address))
+		}
+	}
+	return values
+}
+
+func normalizeKVMIPv6List(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func shellQuotedKVMIPv6List(values []string) string {
+	values = normalizeKVMIPv6List(values)
+	if len(values) == 0 {
+		return "''"
+	}
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, shellQuote(value))
+	}
+	return strings.Join(quoted, " ")
 }
 
 func indentScript(script string, spaces int) string {
@@ -2575,7 +2639,7 @@ func (m *Manager) syncRunningNetworks() {
 		} else if err != nil {
 			fmt.Printf("Warning: failed to sync KVM network for %s: %v\n", c.Name, err)
 		}
-		if c.IPv6 != "" {
+		if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 			if err := m.applyIPv6Runtime(c); err != nil {
 				fmt.Printf("Warning: failed to sync KVM IPv6 for %s: %v\n", c.Name, err)
 			}
@@ -2589,7 +2653,7 @@ func (m *Manager) applyIPv6Guards() {
 		if !c.IsKVM() || c.MACAddress == "" {
 			continue
 		}
-		if c.IPv6 == "" {
+		if c.IPv6 == "" && len(c.IPv6Addresses) == 0 {
 			ensureKVMIPv6DenyRule("virbr0", c.MACAddress)
 			continue
 		}
@@ -2935,13 +2999,12 @@ func (m *Manager) AssignIPv6(id int) (*config.Container, error) {
 		return nil, fmt.Errorf("container is not a KVM VM: %d", id)
 	}
 	if c.IPv6 == "" {
-		addr, prefixLen, iface, err := m.allocateIPv6ForContainer(id)
+		assignments, err := m.allocateIPv6AssignmentsForContainer(id, nil, 1, true)
 		if err != nil {
 			return nil, err
 		}
-		c.IPv6 = addr
-		c.IPv6PrefixLen = prefixLen
-		c.IPv6Interface = iface
+		c.IPv6Addresses = append(c.IPv6Addresses, assignments...)
+		c.NormalizeNetworkAssignments()
 		config.SaveConfig()
 	}
 	if err := m.applyIPv6Runtime(c); err != nil {
@@ -2951,9 +3014,10 @@ func (m *Manager) AssignIPv6(id int) (*config.Container, error) {
 }
 
 func (m *Manager) applyIPv6Runtime(c *config.Container) error {
-	if c == nil || c.IPv6 == "" {
+	if c == nil || (c.IPv6 == "" && len(c.IPv6Addresses) == 0) {
 		return nil
 	}
+	c.NormalizeNetworkAssignments()
 	if err := m.applyIPv6HostRuntime(c); err != nil {
 		return err
 	}
@@ -2964,7 +3028,13 @@ func (m *Manager) applyIPv6Runtime(c *config.Container) error {
 			}
 		}
 	}
-	ensureKVMIPv6NAT66(c.IPv6, c.IPv6Interface)
+	for _, assignment := range c.IPv6Addresses {
+		uplink := assignment.Interface
+		if uplink == "" {
+			uplink = c.IPv6Interface
+		}
+		ensureKVMIPv6NAT66(assignment.Address, uplink)
+	}
 	return nil
 }
 
@@ -2980,9 +3050,10 @@ func shouldLogIPv6GuestWarning(id int) bool {
 }
 
 func (m *Manager) applyIPv6HostRuntime(c *config.Container) error {
-	if c == nil || c.IPv6 == "" {
+	if c == nil || (c.IPv6 == "" && len(c.IPv6Addresses) == 0) {
 		return nil
 	}
+	c.NormalizeNetworkAssignments()
 	if c.IPv6Interface == "" {
 		prefixes := lxc.DetectPublicIPv6Prefixes()
 		if len(prefixes) == 0 {
@@ -2990,6 +3061,14 @@ func (m *Manager) applyIPv6HostRuntime(c *config.Container) error {
 		}
 		c.IPv6Interface = prefixes[0].Interface
 		c.IPv6PrefixLen = prefixes[0].PrefixLen
+		for i := range c.IPv6Addresses {
+			if c.IPv6Addresses[i].Interface == "" {
+				c.IPv6Addresses[i].Interface = c.IPv6Interface
+			}
+			if c.IPv6Addresses[i].PrefixLen == 0 {
+				c.IPv6Addresses[i].PrefixLen = c.IPv6PrefixLen
+			}
+		}
 		config.SaveConfig()
 	}
 	runQuiet("sysctl", "-w", "net.ipv6.conf.all.forwarding=1")
@@ -3001,14 +3080,20 @@ func (m *Manager) applyIPv6HostRuntime(c *config.Container) error {
 	runQuiet("sysctl", "-w", "net.ipv6.conf."+bridge+".proxy_ndp=1")
 	runQuiet("ip", "link", "set", bridge, "up")
 	runQuiet("ip", "-6", "addr", "replace", ipv6GatewayLinkLocal+"/64", "dev", bridge)
-	if out, err := exec.Command("ip", "-6", "route", "replace", c.IPv6+"/128", "dev", bridge).CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to add IPv6 VM route: %v, output: %s", err, string(out))
+	for _, assignment := range c.IPv6Addresses {
+		uplink := assignment.Interface
+		if uplink == "" {
+			uplink = c.IPv6Interface
+		}
+		if out, err := exec.Command("ip", "-6", "route", "replace", assignment.Address+"/128", "dev", bridge).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to add IPv6 VM route: %v, output: %s", err, string(out))
+		}
+		if out, err := exec.Command("ip", "-6", "neigh", "replace", "proxy", assignment.Address, "dev", uplink).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to add IPv6 proxy NDP: %v, output: %s", err, string(out))
+		}
+		ensureKVMIPv6ForwardRules(assignment.Address, bridge)
+		ensureKVMIPv6AntiSpoofRules(assignment.Address, bridge, c.MACAddress)
 	}
-	if out, err := exec.Command("ip", "-6", "neigh", "replace", "proxy", c.IPv6, "dev", c.IPv6Interface).CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to add IPv6 proxy NDP: %v, output: %s", err, string(out))
-	}
-	ensureKVMIPv6ForwardRules(c.IPv6, bridge)
-	ensureKVMIPv6AntiSpoofRules(c.IPv6, bridge, c.MACAddress)
 	return nil
 }
 
@@ -3074,16 +3159,23 @@ func removeKVMIPv6Runtime(c *config.Container) {
 	}
 	bridge := "virbr0"
 	removeKVMIPv6DenyRule(bridge, c.MACAddress)
-	if c.IPv6 == "" {
+	if c.IPv6 == "" && len(c.IPv6Addresses) == 0 {
 		return
 	}
-	removeKVMIPv6NAT66(c.IPv6, c.IPv6Interface)
-	removeKVMIPv6ForwardRules(c.IPv6, bridge)
-	removeKVMIPv6AntiSpoofRules(c.IPv6, bridge, c.MACAddress)
-	if c.IPv6Interface != "" {
-		_ = exec.Command("ip", "-6", "neigh", "del", "proxy", c.IPv6, "dev", c.IPv6Interface).Run()
+	c.NormalizeNetworkAssignments()
+	for _, assignment := range c.IPv6Addresses {
+		uplink := assignment.Interface
+		if uplink == "" {
+			uplink = c.IPv6Interface
+		}
+		removeKVMIPv6NAT66(assignment.Address, uplink)
+		removeKVMIPv6ForwardRules(assignment.Address, bridge)
+		removeKVMIPv6AntiSpoofRules(assignment.Address, bridge, c.MACAddress)
+		if uplink != "" {
+			_ = exec.Command("ip", "-6", "neigh", "del", "proxy", assignment.Address, "dev", uplink).Run()
+		}
+		_ = exec.Command("ip", "-6", "route", "del", assignment.Address+"/128", "dev", bridge).Run()
 	}
-	_ = exec.Command("ip", "-6", "route", "del", c.IPv6+"/128", "dev", bridge).Run()
 }
 
 func removeKVMIPv6ForwardRules(ipv6 string, bridge string) {
@@ -3147,13 +3239,14 @@ func deleteIP6Rule(rule []string) {
 }
 
 func (m *Manager) applyGuestIPv6(c *config.Container) error {
-	if c == nil || c.IPv6 == "" {
+	if c == nil || (c.IPv6 == "" && len(c.IPv6Addresses) == 0) {
 		return nil
 	}
+	c.NormalizeNetworkAssignments()
 	if IsWindowsImage(c.Template) {
 		return m.applyWindowsGuestIPv6(c)
 	}
-	script := kvmIPv6SetupScript(c.IPv6)
+	script := kvmIPv6SetupScript(c.IPv6AddressStrings())
 	if err := qemuGuestPing(c.VirshName()); err != nil {
 		return err
 	}
@@ -3167,14 +3260,15 @@ func (m *Manager) applyWindowsGuestIPv6(c *config.Container) error {
 	if err := qemuGuestPing(c.VirshName()); err != nil {
 		return err
 	}
-	script := windowsIPv6PowerShell(c.IPv6)
+	script := windowsIPv6PowerShell(c.IPv6AddressStrings())
 	return qemuGuestExecCommand(c.VirshName(), "powershell.exe", []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script}, 60*time.Second)
 }
 
 func (m *Manager) applyGuestIPv6Runtime(c *config.Container) error {
-	if c == nil || c.IPv6 == "" {
+	if c == nil || (c.IPv6 == "" && len(c.IPv6Addresses) == 0) {
 		return nil
 	}
+	c.NormalizeNetworkAssignments()
 	qgaErr := m.applyGuestIPv6(c)
 	if qgaErr == nil {
 		return nil
@@ -3187,7 +3281,7 @@ func (m *Manager) applyGuestIPv6Runtime(c *config.Container) error {
 }
 
 func (m *Manager) applyGuestIPv6OverSSH(c *config.Container) error {
-	if c == nil || c.IPv6 == "" {
+	if c == nil || (c.IPv6 == "" && len(c.IPv6Addresses) == 0) {
 		return nil
 	}
 	if IsWindowsImage(c.Template) {
@@ -3206,12 +3300,13 @@ func (m *Manager) applyGuestIPv6OverSSH(c *config.Container) error {
 		return err
 	}
 	defer client.Close()
-	return runKVMSSHScript(client, kvmIPv6SetupScript(c.IPv6), "KVM IPv6", 60*time.Second)
+	return runKVMSSHScript(client, kvmIPv6SetupScript(c.IPv6AddressStrings()), "KVM IPv6", 60*time.Second)
 }
 
-func kvmIPv6SetupScript(ipv6 string) string {
+func kvmIPv6SetupScript(ipv6s []string) string {
+	ipv6s = normalizeKVMIPv6List(ipv6s)
 	return `set -eu
-IPV6_ADDR=` + shellQuote(ipv6) + `
+IPV6_ADDRS="` + strings.Join(ipv6s, " ") + `"
 IPV6_GW=` + shellQuote(ipv6GatewayLinkLocal) + `
 IFACE="$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')"
 if [ -z "$IFACE" ]; then
@@ -3224,13 +3319,15 @@ fi
 sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf."$IFACE".disable_ipv6=0 >/dev/null 2>&1 || true
-ip -6 addr replace "$IPV6_ADDR/128" dev "$IFACE"
+for IPV6_ADDR in $IPV6_ADDRS; do
+	ip -6 addr replace "$IPV6_ADDR/128" dev "$IFACE"
+done
 ip -6 route replace default via "$IPV6_GW" dev "$IFACE" onlink metric 100
 mkdir -p /usr/local/sbin /etc/systemd/system /etc/network/if-up.d /etc/local.d
 cat > /usr/local/sbin/clicd-kvm-ipv6-init <<'EOF'
 #!/bin/sh
 set -eu
-IPV6_ADDR=` + shellQuote(ipv6) + `
+IPV6_ADDRS="` + strings.Join(ipv6s, " ") + `"
 IPV6_GW=` + shellQuote(ipv6GatewayLinkLocal) + `
 IFACE="$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')"
 if [ -z "$IFACE" ]; then
@@ -3240,7 +3337,9 @@ fi
 sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 || true
 sysctl -w net.ipv6.conf."$IFACE".disable_ipv6=0 >/dev/null 2>&1 || true
-ip -6 addr replace "$IPV6_ADDR/128" dev "$IFACE"
+for IPV6_ADDR in $IPV6_ADDRS; do
+	ip -6 addr replace "$IPV6_ADDR/128" dev "$IFACE"
+done
 ip -6 route replace default via "$IPV6_GW" dev "$IFACE" onlink metric 100
 EOF
 chmod +x /usr/local/sbin/clicd-kvm-ipv6-init
@@ -3279,14 +3378,43 @@ chmod +x /etc/network/if-up.d/clicd-kvm-ipv6
 }
 
 func (m *Manager) allocateIPv6ForContainer(id int) (string, int, string, error) {
-	prefixes := lxc.DetectPublicIPv6Prefixes()
-	if len(prefixes) == 0 {
-		return "", 0, "", fmt.Errorf("public IPv6 allocation is unavailable: no usable public IPv6 prefix found")
-	}
-	prefixInfo := prefixes[0]
-	prefix, err := netip.ParsePrefix(prefixInfo.Prefix)
+	assignments, err := m.allocateIPv6AssignmentsForContainer(id, nil, 1, true)
 	if err != nil {
 		return "", 0, "", err
+	}
+	if len(assignments) == 0 {
+		return "", 0, "", fmt.Errorf("no free IPv6 address")
+	}
+	return assignments[0].Address, assignments[0].PrefixLen, assignments[0].Interface, nil
+}
+
+func (m *Manager) allocateIPv6AssignmentsForContainer(id int, requested []string, count int, auto bool) ([]config.IPv6Assignment, error) {
+	if count <= 0 {
+		count = 1
+	}
+	if len(requested) > count {
+		count = len(requested)
+	}
+	prefixes := lxc.DetectPublicIPv6Prefixes()
+	if len(prefixes) == 0 {
+		return nil, fmt.Errorf("public IPv6 allocation is unavailable: no usable public IPv6 prefix found")
+	}
+	parsedPrefixes := make([]struct {
+		info   lxc.IPv6PrefixInfo
+		prefix netip.Prefix
+	}, 0, len(prefixes))
+	for _, prefixInfo := range prefixes {
+		prefix, err := netip.ParsePrefix(prefixInfo.Prefix)
+		if err != nil {
+			continue
+		}
+		parsedPrefixes = append(parsedPrefixes, struct {
+			info   lxc.IPv6PrefixInfo
+			prefix netip.Prefix
+		}{info: prefixInfo, prefix: prefix})
+	}
+	if len(parsedPrefixes) == 0 {
+		return nil, fmt.Errorf("public IPv6 allocation is unavailable: no valid IPv6 prefix found")
 	}
 
 	used := map[string]bool{}
@@ -3295,21 +3423,69 @@ func (m *Manager) allocateIPv6ForContainer(id int) (string, int, string, error) 
 		hostAddrs[p.Address] = true
 	}
 	for _, c := range config.AppConfig.Containers {
+		if c.ID == id {
+			continue
+		}
 		if c.IPv6 != "" {
 			used[c.IPv6] = true
 		}
-	}
-	for offset := uint64(0x2000 + id); offset < 0x100000; offset++ {
-		addr, err := ipv6Add(prefix.Masked().Addr(), offset)
-		if err != nil || !prefix.Contains(addr) {
-			break
-		}
-		candidate := addr.String()
-		if !used[candidate] && !hostAddrs[candidate] {
-			return candidate, prefix.Bits(), prefixInfo.Interface, nil
+		for _, ip := range c.IPv6Addresses {
+			if ip.Address != "" {
+				used[ip.Address] = true
+			}
 		}
 	}
-	return "", 0, "", fmt.Errorf("no free IPv6 address in %s", prefix.String())
+	result := make([]config.IPv6Assignment, 0, count)
+	selected := map[string]bool{}
+	for _, raw := range requested {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || selected[raw] {
+			continue
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err != nil || !addr.Is6() {
+			return nil, fmt.Errorf("requested IPv6 %s is not valid", raw)
+		}
+		matchIndex := -1
+		for i, item := range parsedPrefixes {
+			if item.prefix.Contains(addr) {
+				matchIndex = i
+				break
+			}
+		}
+		if matchIndex < 0 {
+			return nil, fmt.Errorf("requested IPv6 %s is not in the configured IPv6 prefixes", raw)
+		}
+		if hostAddrs[raw] {
+			return nil, fmt.Errorf("requested IPv6 %s is used by host", raw)
+		}
+		if used[raw] {
+			return nil, fmt.Errorf("requested IPv6 %s is already assigned", raw)
+		}
+		selected[raw] = true
+		used[raw] = true
+		result = append(result, config.IPv6Assignment{Address: raw, PrefixLen: parsedPrefixes[matchIndex].prefix.Bits(), Interface: parsedPrefixes[matchIndex].info.Interface})
+	}
+	if len(result) >= count || !auto {
+		return result, nil
+	}
+	for _, item := range parsedPrefixes {
+		for offset := uint64(0x2000 + id); offset < 0x100000; offset++ {
+			addr, err := ipv6Add(item.prefix.Masked().Addr(), offset)
+			if err != nil || !item.prefix.Contains(addr) {
+				break
+			}
+			candidate := addr.String()
+			if !used[candidate] && !hostAddrs[candidate] {
+				used[candidate] = true
+				result = append(result, config.IPv6Assignment{Address: candidate, PrefixLen: item.prefix.Bits(), Interface: item.info.Interface})
+				if len(result) >= count {
+					return result, nil
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("no free IPv6 address in configured prefixes")
 }
 
 func ipv6Add(base netip.Addr, offset uint64) (netip.Addr, error) {

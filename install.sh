@@ -958,7 +958,7 @@ install_apk() {
         libvirt-client \
         libvirt-qemu
 
-    for pkg in lxcfs shadow conntrack-tools quota-tools e2fsprogs xfsprogs cloud-utils genisoimage xorriso; do
+    for pkg in lxcfs shadow conntrack-tools quota-tools e2fsprogs xfsprogs cloud-utils genisoimage xorriso smartmontools; do
         apk add --no-cache "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
@@ -987,12 +987,14 @@ install_apt() {
         xfsprogs \
         dnsmasq-base \
         qemu-kvm \
+        qemu-system-x86 \
         qemu-utils \
         libvirt-daemon-system \
         libvirt-clients \
         cloud-image-utils \
         genisoimage \
         xorriso \
+        smartmontools \
         virtinst \
         ovmf
 }
@@ -1040,7 +1042,7 @@ install_dnf() {
         cloud-utils \
         genisoimage
 
-    for pkg in lxcfs xorriso edk2-ovmf; do
+    for pkg in lxcfs xorriso edk2-ovmf smartmontools; do
         dnf install -y "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
@@ -1075,7 +1077,7 @@ install_yum() {
         cloud-utils \
         genisoimage
 
-    for pkg in lxcfs xorriso edk2-ovmf; do
+    for pkg in lxcfs xorriso edk2-ovmf smartmontools; do
         yum install -y "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }

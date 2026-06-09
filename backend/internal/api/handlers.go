@@ -228,11 +228,36 @@ func createContainer(w http.ResponseWriter, r *http.Request) {
 	if cfg.DiskGB < 1 {
 		cfg.DiskGB = 5
 	}
-	if cfg.PortMappingCount < 2 {
+	if cfg.PortMappingCount < 0 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Port mapping count cannot be negative"})
+		return
+	}
+	if cfg.WantsNAT() && cfg.PortMappingCount < 2 {
 		cfg.PortMappingCount = 2
+	} else if !cfg.WantsNAT() {
+		cfg.PortMappingCount = 0
+		cfg.ExtraPorts = nil
 	}
 	if cfg.PortMappingCount > 64 {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Port mapping count cannot exceed 64"})
+		return
+	}
+	if cfg.IPv4Count < 0 || cfg.IPv6Count < 0 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "IP address count cannot be negative"})
+		return
+	}
+	if cfg.IPv4Count > 64 || cfg.IPv6Count > 64 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "IP address count cannot exceed 64"})
+		return
+	}
+	if !cfg.AssignIPv4 && len(cfg.PublicIPv4s) == 0 {
+		cfg.IPv4Count = 0
+	}
+	if !cfg.AssignIPv6 && len(cfg.IPv6Addresses) == 0 {
+		cfg.IPv6Count = 0
+	}
+	if !hasRequestedNetwork(cfg) {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: noNetworkSelectedMessage})
 		return
 	}
 	if cfg.SnapshotLimit <= 0 {
@@ -405,24 +430,11 @@ func getRandomPort(w http.ResponseWriter, r *http.Request, id int) {
 		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
 		return
 	}
-	// Find a random unused port between 10000-65535
-	used := map[int]bool{}
-	for _, pm := range c.PortMappings {
-		used[pm.HostPort] = true
-	}
-	// Also check all containers
-	for _, oc := range config.AppConfig.Containers {
-		if oc.ID == id {
-			continue
-		}
-		for _, pm := range oc.PortMappings {
-			used[pm.HostPort] = true
-		}
-	}
+	hostIP := strings.TrimSpace(r.URL.Query().Get("host_ip"))
 	// Try random ports
 	for tries := 0; tries < 100; tries++ {
 		port := 10000 + (int(time.Now().UnixNano()) % 55535)
-		if !used[port] {
+		if lxc.HostPortAvailable(c, hostIP, port, "tcp") {
 			jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]int{"port": port}})
 			return
 		}

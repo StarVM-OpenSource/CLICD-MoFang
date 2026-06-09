@@ -85,6 +85,7 @@ type HostDiskProbe struct {
 	Serial       string             `json:"serial"`
 	SizeBytes    uint64             `json:"size_bytes"`
 	Type         string             `json:"type"`
+	Virtual      bool               `json:"virtual"`
 	Rotational   bool               `json:"rotational"`
 	Mountpoints  []string           `json:"mountpoints"`
 	Health       string             `json:"health"`
@@ -201,6 +202,7 @@ type NetworkInfo struct {
 	TXBps               float64              `json:"tx_bps"`
 	PublicIPv4          string               `json:"public_ipv4"`
 	PublicIPv4Interface string               `json:"public_ipv4_interface"`
+	PublicIPv4Addresses []lxc.PublicIPInfo   `json:"public_ipv4_addresses"`
 	PublicIPv6          string               `json:"public_ipv6"`
 	PublicIPv6Interface string               `json:"public_ipv6_interface"`
 	IPv6Prefixes        []lxc.IPv6PrefixInfo `json:"ipv6_prefixes"`
@@ -398,7 +400,8 @@ func getHostRates() (NetworkInfo, DiskIOInfo) {
 	publicIPv4 := lxc.DetectPublicIPv4()
 	network.PublicIPv4 = publicIPv4.Address
 	network.PublicIPv4Interface = publicIPv4.Interface
-	network.IPv6Prefixes = lxc.DetectPublicIPv6Prefixes()
+	network.PublicIPv4Addresses = lxc.DetectFreePublicIPv4Candidates(0)
+	network.IPv6Prefixes = lxc.DetectHostPublicIPv6Prefixes()
 	if len(network.IPv6Prefixes) > 0 {
 		network.PublicIPv6 = network.IPv6Prefixes[0].Address
 		network.PublicIPv6Interface = network.IPv6Prefixes[0].Interface
@@ -540,7 +543,7 @@ func getHostProbeReport() HostProbeReport {
 		Disks:             detectHostDisks(),
 		NetworkInterfaces: detectHostNICs(),
 		PublicIPv4:        detectAllPublicIPv4(),
-		IPv6Prefixes:      lxc.DetectPublicIPv6Prefixes(),
+		IPv6Prefixes:      lxc.DetectHostPublicIPv6Prefixes(),
 		Gateways:          detectGateways(),
 		GPUs:              detectGPUs(),
 		System:            detectSystemProbe(),
@@ -676,17 +679,23 @@ func detectHostDisks() []HostDiskProbe {
 		}
 		base := filepath.Join("/sys/block", name)
 		path := "/dev/" + name
+		model := strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "device/model"), filepath.Join(base, "device/name")))
+		vendor := strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "device/vendor")))
+		virtual := isVirtualBlockDevice(name, model, vendor)
 		disk := HostDiskProbe{
 			Name:        name,
 			Path:        path,
-			Model:       strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "device/model"), filepath.Join(base, "device/name"))),
+			Model:       model,
 			Serial:      strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "device/serial"), filepath.Join(base, "serial"))),
 			SizeBytes:   readUintFile(filepath.Join(base, "size")) * 512,
-			Type:        detectDiskType(base, name),
+			Type:        detectDiskType(base, name, virtual),
+			Virtual:     virtual,
 			Rotational:  strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "queue/rotational"))) == "1",
 			Mountpoints: mounts[name],
 		}
-		disk.SMART = detectDiskSMART(path)
+		if !virtual {
+			disk.SMART = detectDiskSMART(path)
+		}
 		disk.Health = disk.SMARTHealth()
 		disk.HealthDetail = disk.SMARTDetail()
 		disks = append(disks, disk)
@@ -695,7 +704,10 @@ func detectHostDisks() []HostDiskProbe {
 	return disks
 }
 
-func detectDiskType(base, name string) string {
+func detectDiskType(base, name string, virtual bool) string {
+	if virtual {
+		return "Virtual"
+	}
 	if strings.HasPrefix(name, "nvme") {
 		return "NVMe"
 	}
@@ -705,7 +717,26 @@ func detectDiskType(base, name string) string {
 	return "SSD"
 }
 
+func isVirtualBlockDevice(name, model, vendor string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name + " " + model + " " + vendor))
+	if strings.HasPrefix(name, "vd") || strings.HasPrefix(name, "xvd") {
+		return true
+	}
+	for _, token := range []string{
+		"qemu", "virtio", "virtual", "vmware", "vbox", "xen",
+		"amazon elastic block store", "google persistentdisk", "microsoft",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
 func (disk HostDiskProbe) SMARTHealth() string {
+	if disk.Virtual {
+		return "virtual"
+	}
 	if disk.SMART.Available && disk.Health != "" {
 		return disk.Health
 	}
@@ -713,6 +744,9 @@ func (disk HostDiskProbe) SMARTHealth() string {
 }
 
 func (disk HostDiskProbe) SMARTDetail() string {
+	if disk.Virtual {
+		return "虚拟磁盘，真实 SMART/寿命/通电数据需在物理宿主机查看"
+	}
 	return disk.SMART.Detail()
 }
 
@@ -1437,7 +1471,7 @@ func commandCheck(key, label string, required bool, cmd string, fallback string)
 	ok := commandExists(cmd)
 	detail := "missing"
 	if ok {
-		detail = strings.TrimSpace(runCommandOutput(2*time.Second, "sh", "-c", cmd+" --version 2>&1 | head -n 1"))
+		detail = commandVersionDetail(cmd)
 		if detail == "" {
 			detail = "installed"
 		}
@@ -1445,6 +1479,15 @@ func commandCheck(key, label string, required bool, cmd string, fallback string)
 		detail = fallback
 	}
 	return HostEnvCheck{Key: key, Label: label, OK: ok, Required: required, Detail: detail}
+}
+
+func commandVersionDetail(cmd string) string {
+	switch cmd {
+	case "ip":
+		return strings.TrimSpace(runCommandOutput(2*time.Second, "sh", "-c", "ip -V 2>&1 | head -n 1"))
+	default:
+		return strings.TrimSpace(runCommandOutput(2*time.Second, "sh", "-c", cmd+" --version 2>&1 | head -n 1"))
+	}
 }
 
 func certbotCheck() HostEnvCheck {

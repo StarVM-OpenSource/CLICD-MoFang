@@ -93,6 +93,7 @@ type MappingDraft = {
   index: number | null
   description: string
   host_port: string
+  host_ip: string
   container_port: string
   protocol: string
 }
@@ -101,6 +102,7 @@ const emptyDraft: MappingDraft = {
   index: null,
   description: '',
   host_port: '',
+  host_ip: '',
   container_port: '',
   protocol: 'all',
 }
@@ -526,6 +528,7 @@ export default function ContainerDetail() {
       index,
       description: pm.description,
       host_port: String(pm.host_port),
+      host_ip: pm.host_ip || '',
       container_port: String(pm.container_port),
       protocol: pm.protocol || 'all',
     })
@@ -538,7 +541,11 @@ export default function ContainerDetail() {
     if (!(await ensureSubUserCanOperate())) return false
     if (draft.index === null && container) {
       const currentCount = container.port_mappings?.length || 0
-      const limit = container.port_mapping_limit || Math.max(currentCount, 2)
+      const limit = Math.max(container.port_mapping_limit || 0, currentCount)
+      if (limit <= 0) {
+        dialog.alert('未分配 IPv4 NAT', '该容器未分配 IPv4 NAT 端口配额。')
+        return false
+      }
       if (currentCount >= limit) {
         dialog.alert('端口配额已满', '已达到管理员分配的 NAT 端口配额。')
         return false
@@ -563,6 +570,7 @@ export default function ContainerDetail() {
     const payload: PortMapping = {
       container_port: containerPort,
       host_port: hostPortVal,
+      host_ip: isSubUser ? undefined : (draft.host_ip || undefined),
       protocol: protocolVal,
       description: draft.description.trim() || `Port-${containerPort}`,
     }
@@ -737,10 +745,17 @@ export default function ContainerDetail() {
   const isPolicyBlocked = !!container.policy_blocked
   const isSubUserPolicyBlocked = isSubUser && isPolicyBlocked
   const policyBlockedText = container.policy_blocked_reason || '虚拟机被策略临时封禁'
-  const publicHost = hostInfo?.network.public_ipv4 || PUBLIC_HOST
+  const publicIPv4s = container.public_ipv4s || []
+  const assignedIPv4List = publicIPv4s.map((item) => item.address).filter(Boolean)
+  const publicHost = assignedIPv4List[0] || hostInfo?.network.public_ipv4 || PUBLIC_HOST
+  const ipv6List = (container.ipv6_addresses || [])
+    .map((item) => item.address)
+    .filter(Boolean)
+  if (ipv6List.length === 0 && container.ipv6) ipv6List.push(container.ipv6)
   const maxVCPU = hostInfo?.cpu.cores || 64
   const maxRAMMB = hostInfo?.ram.total_mb ? Number(hostInfo.ram.total_mb) : undefined
-  const sshCommand = `ssh -p ${container.ssh_port} root@${publicHost}`
+  const publicEndpoint = container.ssh_port > 0 ? `${publicHost}:${container.ssh_port}` : '-'
+  const sshCommand = container.ssh_port > 0 ? `ssh -p ${container.ssh_port} root@${publicHost}` : ''
   const editingSSH = draft.index !== null && !!container.port_mappings?.[draft.index] && (
     container.port_mappings[draft.index].description === 'SSH' || container.port_mappings[draft.index].container_port === 22 ||
     container.port_mappings[draft.index].description === 'RDP' || container.port_mappings[draft.index].container_port === 3389
@@ -758,8 +773,9 @@ export default function ContainerDetail() {
   const netPct = Math.min(((usage?.network_rx_bps || 0) + (usage?.network_tx_bps || 0)) / (container.network_bw_mbps > 0 ? container.network_bw_mbps * 125000 : 125000000) * 100, 100)
   const diskIOBps = (usage?.disk_read_bps || 0) + (usage?.disk_write_bps || 0)
   const mappingCount = container.port_mappings?.length || 0
-  const mappingLimit = container.port_mapping_limit || Math.max(mappingCount, 2)
-  const canAddMapping = isSubUser ? mappingCount < mappingLimit && !isSubUserPolicyBlocked : true
+  const mappingLimit = Math.max(container.port_mapping_limit || 0, mappingCount)
+  const hasNATQuota = mappingLimit > 0
+  const canAddMapping = hasNATQuota && mappingCount < mappingLimit && !isSubUserPolicyBlocked
   const managementUrl = subUser?.access_code
     ? `${window.location.origin}/login?code=${encodeURIComponent(subUser.access_code)}`
     : ''
@@ -828,8 +844,8 @@ export default function ContainerDetail() {
                 <InfoTag color="blue">系统 {container.template}</InfoTag>
                 <InfoTag color="slate">类型 {(container.virtualization || 'lxc').toUpperCase()}</InfoTag>
                 <InfoTag color="emerald">内网 {container.ip || '-'}</InfoTag>
-                <InfoTag color="amber">NAT {mappingCount} 条</InfoTag>
-                <InfoTag color="violet">{isWindows ? 'RDP' : 'SSH'} {publicHost}:{container.ssh_port}</InfoTag>
+                <InfoTag color="amber">IPv4 NAT {hasNATQuota ? `${mappingCount} 条` : '未分配'}</InfoTag>
+                <InfoTag color="violet">{isWindows ? 'RDP' : 'SSH'} {publicEndpoint}</InfoTag>
                 {isPolicyBlocked && <InfoTag color="red">策略封禁</InfoTag>}
               </div>
             </div>
@@ -874,7 +890,7 @@ export default function ContainerDetail() {
             <>
               <ActionButton disabled={isSubUserPolicyBlocked} onClick={() => setShowNat(true)}>
                 <Settings className="w-3.5 h-3.5" />
-                NAT 管理
+                IPv4 NAT 管理
               </ActionButton>
             </>
             <ActionButton onClick={() => setShowSnapshots(true)} disabled={!!taskStatus || !!snapshotBusy || isSubUserPolicyBlocked}>
@@ -926,7 +942,7 @@ export default function ContainerDetail() {
             </div>
           ) : isWindows ? (
             <>
-              <PlainRow label="RDP 地址" value={`${publicHost}:${container.ssh_port}`} mono />
+              <PlainRow label="RDP 地址" value={publicEndpoint} mono />
               <PlainRow label="用户名" value="Administrator" mono />
               <div className="flex items-center justify-between gap-3">
                 <span className="text-gray-500">管理员密码</span>
@@ -951,7 +967,7 @@ export default function ContainerDetail() {
             </>
           ) : (
             <>
-              <PlainRow label="SSH 地址" value={`${publicHost}:${container.ssh_port}`} mono copyValue={sshCommand} onCopy={copyText} />
+              <PlainRow label="SSH 地址" value={publicEndpoint} mono copyValue={sshCommand} onCopy={copyText} />
               <PlainRow label="用户名" value="root" mono />
               <div className="flex items-center justify-between gap-3">
                 <span className="text-gray-500">SSH 密码</span>
@@ -993,8 +1009,9 @@ export default function ContainerDetail() {
           <PlainRow label="识别码" value={container.uuid || '-'} mono copyValue={container.uuid} onCopy={copyText} />
           <PlainRow label="状态" value={isRunning ? '运行中' : '已停止'} />
           <PlainRow label="内网 IP" value={container.ip || '-'} mono />
-          <PlainRow label="IPv6" value={container.ipv6 || '-'} mono copyValue={container.ipv6} onCopy={copyText}>
-            {!isSubUser && !container.ipv6 && (
+          <PlainRow label="Public IPv4" value={assignedIPv4List.length ? assignedIPv4List.join(', ') : '-'} mono copyValue={assignedIPv4List[0]} onCopy={copyText} />
+          <PlainRow label="IPv6" value={ipv6List.length ? ipv6List.join(', ') : '-'} mono copyValue={ipv6List[0]} onCopy={copyText}>
+            {!isSubUser && ipv6List.length === 0 && (
               <button onClick={handleAssignIPv6} disabled={actionLoading === 'ipv6'} className="ml-1 px-1.5 py-0.5 text-[10px] text-gray-600 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-50">
                 Assign
               </button>
@@ -1386,7 +1403,7 @@ export default function ContainerDetail() {
       )}
 
       {showNat && (
-        <Modal title="NAT 端口管理" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
+        <Modal title="IPv4 NAT 端口管理" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
           !isSubUser && canAddMapping && (
             <button onClick={openAddMapping} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
               <Plus className="w-3.5 h-3.5" />添加映射
@@ -1396,10 +1413,14 @@ export default function ContainerDetail() {
           <div className="space-y-5">
             <div className="flex items-center justify-between gap-4">
               <div className="text-xs text-gray-500">
-                端口配额：<span className="font-mono text-gray-800">{mappingCount}/{mappingLimit}</span>
+                {hasNATQuota ? (
+                  <>端口配额：<span className="font-mono text-gray-800">{mappingCount}/{mappingLimit}</span></>
+                ) : (
+                  <span>未分配 IPv4 NAT 端口配额</span>
+                )}
               </div>
-              {!isSubUser && !canAddMapping && (
-                <div className="text-xs text-amber-600">已达到管理员分配的 NAT 端口配额</div>
+              {!isSubUser && hasNATQuota && !canAddMapping && (
+                <div className="text-xs text-amber-600">已达到管理员分配的 IPv4 NAT 端口配额</div>
               )}
             </div>
             <MappingTable mappings={container.port_mappings || []} publicHost={publicHost} onEdit={openEditMapping} onDelete={isSubUser ? () => {} : removeMapping} isSubUser={isSubUser} />
@@ -1419,6 +1440,7 @@ export default function ContainerDetail() {
             canAddMapping={canAddMapping}
             saving={savingMapping}
             containerIdentifier={containerIdentifier}
+            publicIPv4s={publicIPv4s}
             onCancel={() => { setShowMappingEditor(false); setDraft(emptyDraft) }}
             onSubmit={async () => {
               if (await submitMapping()) {
@@ -1739,6 +1761,7 @@ function MappingEditor({
   canAddMapping,
   saving,
   containerIdentifier,
+  publicIPv4s,
   onCancel,
   onSubmit,
 }: {
@@ -1748,6 +1771,7 @@ function MappingEditor({
   canAddMapping: boolean
   saving: boolean
   containerIdentifier: string
+  publicIPv4s: { address: string; interface?: string }[]
   onCancel: () => void
   onSubmit: () => void
 }) {
@@ -1757,7 +1781,8 @@ function MappingEditor({
 
   const fillRandomPort = async () => {
     try {
-      const res = await api.get<APIResponse<{ port: number }>>(`/containers/${containerIdentifier}/random-port`)
+      const params = draft.host_ip ? { host_ip: draft.host_ip } : undefined
+      const res = await api.get<APIResponse<{ port: number }>>(`/containers/${containerIdentifier}/random-port`, { params })
       const port = res.data.data?.port || 0
       if (port > 0) updateDraft({ host_port: String(port) })
     } catch {
@@ -1815,6 +1840,21 @@ function MappingEditor({
           )}
         </Field>
 
+        <Field label="Host IPv4">
+          {isSubUser ? (
+            <input value={draft.host_ip || 'All IPv4'} disabled className={disabledInputClass} />
+          ) : (
+            <select value={draft.host_ip} onChange={(e) => updateDraft({ host_ip: e.target.value })} className={inputClass}>
+              <option value="">All assigned IPv4</option>
+              {publicIPv4s.map((ip) => (
+                <option key={`${ip.interface}-${ip.address}`} value={ip.address}>
+                  {ip.address}{ip.interface ? ` (${ip.interface})` : ''}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
         <Field label="内部端口">
           <input
             value={draft.container_port}
@@ -1854,6 +1894,7 @@ function MappingTable({ mappings, publicHost, onEdit, onDelete, compact = false,
           <tr>
             <TableHead>名称</TableHead>
             <TableHead>协议</TableHead>
+            <TableHead>Host IPv4</TableHead>
             <TableHead>外部端口</TableHead>
             <TableHead>内部端口</TableHead>
             {!compact && <th className="text-right px-3 py-2 text-xs font-medium text-gray-500">操作</th>}
@@ -1869,7 +1910,8 @@ function MappingTable({ mappings, publicHost, onEdit, onDelete, compact = false,
                   {isSSH && <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 text-xs">默认</span>}
                 </td>
                 <td className="px-3 py-2 text-xs text-gray-500">{pm.protocol.toUpperCase()}</td>
-                <td className="px-3 py-2 font-mono text-xs text-gray-800">{publicHost}:{pm.host_port}</td>
+                <td className="px-3 py-2 font-mono text-xs text-gray-800">{pm.host_ip || publicHost || 'All IPv4'}</td>
+                <td className="px-3 py-2 font-mono text-xs text-gray-800">{pm.host_port}</td>
                 <td className="px-3 py-2 font-mono text-xs text-gray-800">{pm.container_port}</td>
                 {!compact && (
                   <td className="px-3 py-2">

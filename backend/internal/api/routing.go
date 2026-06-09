@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 
@@ -21,10 +23,22 @@ type nat4Route struct {
 	LXCName       string `json:"lxc_name"`
 	Status        string `json:"status"`
 	IP            string `json:"ip"`
+	HostIP        string `json:"host_ip"`
 	HostPort      int    `json:"host_port"`
 	ContainerPort int    `json:"container_port"`
 	Protocol      string `json:"protocol"`
 	Description   string `json:"description"`
+}
+
+type ipv4Route struct {
+	ContainerID   int    `json:"container_id"`
+	ContainerName string `json:"container_name"`
+	LXCName       string `json:"lxc_name"`
+	Status        string `json:"status"`
+	Address       string `json:"address"`
+	Interface     string `json:"interface"`
+	PrefixLen     int    `json:"prefix_len,omitempty"`
+	Gateway       string `json:"gateway,omitempty"`
 }
 
 type ipv6Route struct {
@@ -38,30 +52,78 @@ type ipv6Route struct {
 }
 
 type routingResponse struct {
-	NAT4            routeCapacity        `json:"nat4"`
-	IPv6            routeCapacity        `json:"ipv6"`
-	NAT4Mappings    []nat4Route          `json:"nat4_mappings"`
-	IPv6Assignments []ipv6Route          `json:"ipv6_assignments"`
-	IPv6Prefixes    []lxc.IPv6PrefixInfo `json:"ipv6_prefixes"`
+	NAT4                routeCapacity        `json:"nat4"`
+	IPv4                routeCapacity        `json:"ipv4"`
+	IPv6                routeCapacity        `json:"ipv6"`
+	HostPublicIPv4      lxc.PublicIPInfo     `json:"host_public_ipv4"`
+	PublicIPv4Addresses []lxc.PublicIPInfo   `json:"public_ipv4_addresses"`
+	IPv4Assignments     []ipv4Route          `json:"ipv4_assignments"`
+	NAT4Mappings        []nat4Route          `json:"nat4_mappings"`
+	IPv6Assignments     []ipv6Route          `json:"ipv6_assignments"`
+	IPv6Prefixes        []lxc.IPv6PrefixInfo `json:"ipv6_prefixes"`
+}
+
+type routingPoolsRequest struct {
+	Addresses    *[]string                      `json:"addresses"`
+	Items        *[]config.PublicIPv4Assignment `json:"items"`
+	IPv6Prefixes *[]config.PublicIPv6Prefix     `json:"ipv6_prefixes"`
+}
+
+type publicIPv4ScanRequest struct {
+	CIDR      string `json:"cidr"`
+	Interface string `json:"interface"`
+	Gateway   string `json:"gateway"`
+	Verify    bool   `json:"verify"`
+	Limit     int    `json:"limit"`
 }
 
 func HandleRouting(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		handleRoutingGet(w, r)
+	case http.MethodPut:
+		handleRoutingPoolsUpdate(w, r)
+	default:
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+	}
+}
+
+func HandleRoutingIPv4Scan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
+	if !requireScope(w, r, "routing:write") {
+		return
+	}
+	var req publicIPv4ScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	results, err := lxc.ScanPublicIPv4Segment(req.CIDR, req.Interface, req.Gateway, req.Verify, req.Limit)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: results})
+}
+
+func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, "routing:read") {
 		return
 	}
 
 	nat4Mappings := make([]nat4Route, 0)
 	usedPorts := map[int]bool{}
+	ipv4Assignments := make([]ipv4Route, 0)
 	ipv6Assignments := make([]ipv6Route, 0)
 
 	const nat4StartPort = 20000
 	const nat4EndPort = 65535
 
-	for _, c := range config.AppConfig.Containers {
+	for i := range config.AppConfig.Containers {
+		c := &config.AppConfig.Containers[i]
 		for _, pm := range c.PortMappings {
 			if pm.HostPort >= nat4StartPort && pm.HostPort <= nat4EndPort {
 				usedPorts[pm.HostPort] = true
@@ -72,29 +134,55 @@ func HandleRouting(w http.ResponseWriter, r *http.Request) {
 				LXCName:       c.LxcName(),
 				Status:        c.Status,
 				IP:            c.IP,
+				HostIP:        pm.HostIP,
 				HostPort:      pm.HostPort,
 				ContainerPort: pm.ContainerPort,
 				Protocol:      pm.Protocol,
 				Description:   pm.Description,
 			})
 		}
-		if c.IPv6 != "" {
+		for _, ip := range c.PublicIPv4s {
+			if ip.Address == "" {
+				continue
+			}
+			ipv4Assignments = append(ipv4Assignments, ipv4Route{
+				ContainerID:   c.ID,
+				ContainerName: c.Name,
+				LXCName:       c.LxcName(),
+				Status:        c.Status,
+				Address:       ip.Address,
+				Interface:     ip.Interface,
+				PrefixLen:     ip.PrefixLen,
+				Gateway:       ip.Gateway,
+			})
+		}
+		c.NormalizeNetworkAssignments()
+		for _, ip := range c.IPv6Addresses {
+			if ip.Address == "" {
+				continue
+			}
 			ipv6Assignments = append(ipv6Assignments, ipv6Route{
 				ContainerID:   c.ID,
 				ContainerName: c.Name,
 				LXCName:       c.LxcName(),
 				Status:        c.Status,
-				Address:       c.IPv6,
-				PrefixLen:     c.IPv6PrefixLen,
-				Interface:     c.IPv6Interface,
+				Address:       ip.Address,
+				PrefixLen:     ip.PrefixLen,
+				Interface:     ip.Interface,
 			})
 		}
 	}
 	sort.SliceStable(nat4Mappings, func(i, j int) bool {
 		if nat4Mappings[i].HostPort == nat4Mappings[j].HostPort {
+			if nat4Mappings[i].HostIP != nat4Mappings[j].HostIP {
+				return nat4Mappings[i].HostIP < nat4Mappings[j].HostIP
+			}
 			return nat4Mappings[i].ContainerName < nat4Mappings[j].ContainerName
 		}
 		return nat4Mappings[i].HostPort < nat4Mappings[j].HostPort
+	})
+	sort.SliceStable(ipv4Assignments, func(i, j int) bool {
+		return ipv4Assignments[i].Address < ipv4Assignments[j].Address
 	})
 	sort.SliceStable(ipv6Assignments, func(i, j int) bool {
 		return ipv6Assignments[i].Address < ipv6Assignments[j].Address
@@ -108,12 +196,16 @@ func HandleRouting(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prefixes := lxc.DetectPublicIPv6Prefixes()
-	ipv6Total := "0"
-	ipv6Remaining := "0"
-	if len(prefixes) > 0 {
-		ipv6Total = lxc.IPv6PrefixCapacity(prefixes[0].PrefixLen)
-		ipv6Remaining = subtractCapacity(ipv6Total, len(ipv6Assignments))
+	hostPublicIPv4 := lxc.DetectPublicIPv4()
+	publicIPv4s := lxc.DetectPublicIPv4Candidates()
+	ipv4Total := len(publicIPv4s)
+	ipv4Used := len(ipv4Assignments)
+	ipv4Remaining := ipv4Total - ipv4Used
+	if ipv4Remaining < 0 {
+		ipv4Remaining = 0
 	}
+	ipv6Total := totalIPv6Capacity(prefixes)
+	ipv6Remaining := subtractCapacity(ipv6Total, len(ipv6Assignments))
 
 	jsonResponse(w, http.StatusOK, APIResponse{
 		Success: true,
@@ -123,16 +215,141 @@ func HandleRouting(w http.ResponseWriter, r *http.Request) {
 				Remaining: strconv.Itoa(nat4Remaining),
 				Total:     strconv.Itoa(totalNAT4Ports),
 			},
+			IPv4: routeCapacity{
+				Used:      ipv4Used,
+				Remaining: strconv.Itoa(ipv4Remaining),
+				Total:     strconv.Itoa(ipv4Total),
+			},
 			IPv6: routeCapacity{
 				Used:      len(ipv6Assignments),
 				Remaining: ipv6Remaining,
 				Total:     ipv6Total,
 			},
-			NAT4Mappings:    nat4Mappings,
-			IPv6Assignments: ipv6Assignments,
-			IPv6Prefixes:    prefixes,
+			HostPublicIPv4:      hostPublicIPv4,
+			PublicIPv4Addresses: publicIPv4s,
+			IPv4Assignments:     ipv4Assignments,
+			NAT4Mappings:        nat4Mappings,
+			IPv6Assignments:     ipv6Assignments,
+			IPv6Prefixes:        prefixes,
 		},
 	})
+}
+
+func handleRoutingPoolsUpdate(w http.ResponseWriter, r *http.Request) {
+	if !requireScope(w, r, "routing:write") {
+		return
+	}
+	var req routingPoolsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+
+	if req.Items != nil || req.Addresses != nil {
+		items := []config.PublicIPv4Assignment{}
+		if req.Items != nil {
+			items = *req.Items
+		} else if req.Addresses != nil {
+			items = make([]config.PublicIPv4Assignment, 0, len(*req.Addresses))
+			for _, address := range *req.Addresses {
+				items = append(items, config.PublicIPv4Assignment{Address: address})
+			}
+		}
+		normalized, err := lxc.NormalizePublicIPv4Pool(items)
+		if err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		allowed := map[string]bool{}
+		for _, item := range normalized {
+			allowed[item.Address] = true
+		}
+		for _, c := range config.AppConfig.Containers {
+			for _, item := range c.PublicIPv4s {
+				if item.Address != "" && !allowed[item.Address] {
+					jsonResponse(w, http.StatusBadRequest, APIResponse{
+						Success: false,
+						Message: "IPv4 " + item.Address + " is assigned to container " + c.Name + " and cannot be removed from the pool",
+					})
+					return
+				}
+			}
+		}
+		config.AppConfig.PublicIPv4Pool = normalized
+	}
+
+	if req.IPv6Prefixes != nil {
+		normalized, err := lxc.NormalizePublicIPv6Prefixes(*req.IPv6Prefixes)
+		if err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		parsedPrefixes := make([]netip.Prefix, 0, len(normalized))
+		for _, item := range normalized {
+			prefix, err := netip.ParsePrefix(item.Prefix)
+			if err == nil {
+				parsedPrefixes = append(parsedPrefixes, prefix)
+			}
+		}
+		for _, c := range config.AppConfig.Containers {
+			c.NormalizeNetworkAssignments()
+			for _, item := range c.IPv6Addresses {
+				if item.Address == "" {
+					continue
+				}
+				addr, err := netip.ParseAddr(item.Address)
+				if err != nil {
+					continue
+				}
+				contained := false
+				for _, prefix := range parsedPrefixes {
+					if prefix.Contains(addr) {
+						contained = true
+						break
+					}
+				}
+				if !contained {
+					jsonResponse(w, http.StatusBadRequest, APIResponse{
+						Success: false,
+						Message: "IPv6 " + item.Address + " is assigned to container " + c.Name + " and cannot be removed from the pool",
+					})
+					return
+				}
+			}
+		}
+		config.AppConfig.PublicIPv6Prefixes = normalized
+	}
+
+	if err := config.SaveConfig(); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save configuration"})
+		return
+	}
+	handleRoutingGet(w, r)
+}
+
+func totalIPv6Capacity(prefixes []lxc.IPv6PrefixInfo) string {
+	if len(prefixes) == 0 {
+		return "0"
+	}
+	var total uint64
+	for _, prefix := range prefixes {
+		capacity := lxc.IPv6PrefixCapacity(prefix.PrefixLen)
+		if capacity == "large" {
+			return "large"
+		}
+		parsed, err := strconv.ParseUint(capacity, 10, 64)
+		if err != nil {
+			continue
+		}
+		if ^uint64(0)-total < parsed {
+			return "large"
+		}
+		total += parsed
+	}
+	if total == 0 {
+		return "0"
+	}
+	return strconv.FormatUint(total, 10)
 }
 
 func subtractCapacity(total string, used int) string {

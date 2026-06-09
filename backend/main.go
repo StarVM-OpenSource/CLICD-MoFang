@@ -55,6 +55,7 @@ func main() {
 		// Ensure iptables FORWARD rules allow managed bridge traffic.
 		lxc.EnsureForwardRules("lxcbr0")
 		lxc.EnsureForwardRules("virbr0")
+		lxc.EnsureAllAssignedPublicIPv4s()
 
 		// Start expiry scanners (stops expired/over-traffic workloads every 30s)
 		manager := lxc.NewManager()
@@ -74,6 +75,7 @@ func main() {
 
 		// Clean up stale container configs (LXC dir was deleted but config remains)
 		config.CleanStaleContainers()
+		lxc.EnsureAllRunningPortMappings()
 
 		// Pre-warm SSH for containers already running after host boot or service restart.
 		manager.StartSSHWarmupScanner()

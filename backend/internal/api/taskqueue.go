@@ -575,8 +575,37 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: name + ": template is not enabled or downloaded"})
 			return
 		}
-		if req.Containers[i].PortMappingCount < 2 {
+		if req.Containers[i].PortMappingCount < 0 {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": port mapping count cannot be negative"})
+			return
+		}
+		if req.Containers[i].WantsNAT() && req.Containers[i].PortMappingCount < 2 {
 			req.Containers[i].PortMappingCount = 2
+		} else if !req.Containers[i].WantsNAT() {
+			req.Containers[i].PortMappingCount = 0
+			req.Containers[i].ExtraPorts = nil
+		}
+		if req.Containers[i].PortMappingCount > 64 {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": port mapping count cannot exceed 64"})
+			return
+		}
+		if req.Containers[i].IPv4Count < 0 || req.Containers[i].IPv6Count < 0 {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": IP address count cannot be negative"})
+			return
+		}
+		if req.Containers[i].IPv4Count > 64 || req.Containers[i].IPv6Count > 64 {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": IP address count cannot exceed 64"})
+			return
+		}
+		if !req.Containers[i].AssignIPv4 && len(req.Containers[i].PublicIPv4s) == 0 {
+			req.Containers[i].IPv4Count = 0
+		}
+		if !req.Containers[i].AssignIPv6 && len(req.Containers[i].IPv6Addresses) == 0 {
+			req.Containers[i].IPv6Count = 0
+		}
+		if !hasRequestedNetwork(req.Containers[i]) {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": " + noNetworkSelectedMessage})
+			return
 		}
 		if req.Containers[i].SnapshotLimit <= 0 {
 			req.Containers[i].SnapshotLimit = config.DefaultSnapshotLimit

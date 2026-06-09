@@ -2,8 +2,10 @@ package lxc
 
 import (
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"clicd/internal/config"
 )
@@ -17,6 +19,7 @@ func (m *Manager) ApplyPortMappings(id int) error {
 	if c.IP == "" {
 		return fmt.Errorf("container has no IP")
 	}
+	EnsureAssignedPublicIPv4s(c.PublicIPv4s)
 	tag := clicdTag(id)
 	bridge := "lxcbr0"
 	subnet := "10.0.3.0/24"
@@ -27,34 +30,179 @@ func (m *Manager) ApplyPortMappings(id int) error {
 
 	EnsureForwardRules(bridge)
 	m.CleanPortMappings(id)
+	deleteBridgeMasquerade(subnet)
 
 	for _, pm := range c.PortMappings {
-		cmd := exec.Command("iptables",
-			"-t", "nat",
-			"-I", "PREROUTING", "1",
-			"-p", pm.Protocol,
-			"--dport", fmt.Sprintf("%d", pm.HostPort),
-			"-j", "DNAT",
-			"--to-destination", fmt.Sprintf("%s:%d", c.IP, pm.ContainerPort),
-			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%d", tag, pm.HostPort),
-		)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Printf("Warning: failed to apply port mapping %d->%s:%d: %v, output: %s\n",
-				pm.HostPort, c.IP, pm.ContainerPort, err, string(output))
-			continue
+		for _, hostIP := range expandPortMappingHostIPs(c, pm) {
+			args := []string{
+				"-t", "nat",
+				"-I", "PREROUTING", "1",
+				"-p", pm.Protocol,
+			}
+			if hostIP != "" {
+				args = append(args, "-d", hostIP)
+			}
+			args = append(args,
+				"--dport", fmt.Sprintf("%d", pm.HostPort),
+				"-j", "DNAT",
+				"--to-destination", fmt.Sprintf("%s:%d", c.IP, pm.ContainerPort),
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-%d", tag, natRuleIPTag(hostIP), pm.HostPort),
+			)
+			cmd := exec.Command("iptables", args...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				fmt.Printf("Warning: failed to apply port mapping %s:%d->%s:%d: %v, output: %s\n",
+					displayHostIP(hostIP), pm.HostPort, c.IP, pm.ContainerPort, err, string(output))
+				continue
+			}
+			fmt.Printf("Port mapping: %s:%d -> %s:%d\n", displayHostIP(hostIP), pm.HostPort, c.IP, pm.ContainerPort)
 		}
-		fmt.Printf("Port mapping: host:%d -> %s:%d\n", pm.HostPort, c.IP, pm.ContainerPort)
 	}
 
-	if exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-o", "eth+", "-j", "MASQUERADE").Run() != nil {
-		exec.Command("iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-s", subnet, "-o", "eth+", "-j", "MASQUERADE").Run()
-	}
+	applyIPv4EgressPolicy(c, bridge, subnet, tag)
 
 	return nil
 }
 
+func applyIPv4EgressPolicy(c *config.Container, bridge, subnet, tag string) {
+	if c == nil || strings.TrimSpace(c.IP) == "" {
+		return
+	}
+	if containerAllowsPublicIPv4Egress(c) {
+		if _, ok := primaryPublicIPv4Assignment(c); ok {
+			applyPublicIPv4SNAT(c, tag)
+			return
+		}
+		ensureContainerMasquerade(c, tag)
+		return
+	}
+	ensureIPv4EgressBlocked(c, bridge, subnet, tag)
+}
+
+func containerAllowsPublicIPv4Egress(c *config.Container) bool {
+	if c == nil {
+		return false
+	}
+	if len(c.PublicIPv4s) > 0 {
+		return true
+	}
+	return c.PortMappingLimit > 0 || len(c.PortMappings) > 0
+}
+
+func ensureContainerMasquerade(c *config.Container, tag string) {
+	args := []string{
+		"-s", c.IP + "/32",
+		"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-masq", tag),
+		"-j", "MASQUERADE",
+	}
+	if host := DetectPublicIPv4(); strings.TrimSpace(host.Interface) != "" {
+		args = append([]string{"-o", strings.TrimSpace(host.Interface)}, args...)
+	} else {
+		args = append([]string{"-o", "eth+"}, args...)
+	}
+	ensureNATRule("POSTROUTING", args)
+}
+
+func ensureIPv4EgressBlocked(c *config.Container, bridge, subnet, tag string) {
+	args := []string{
+		"-i", bridge,
+		"-s", c.IP + "/32",
+		"!", "-d", subnet,
+		"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-v4-egress-block", tag),
+		"-j", "REJECT",
+	}
+	ensureFilterRule("FORWARD", args)
+}
+
+func ensureNATRule(chain string, args []string) {
+	check := append([]string{"-t", "nat", "-C", chain}, args...)
+	if exec.Command("iptables", check...).Run() == nil {
+		return
+	}
+	add := append([]string{"-t", "nat", "-I", chain, "1"}, args...)
+	exec.Command("iptables", add...).Run()
+}
+
+func ensureFilterRule(chain string, args []string) {
+	check := append([]string{"-C", chain}, args...)
+	if exec.Command("iptables", check...).Run() == nil {
+		return
+	}
+	add := append([]string{"-I", chain, "1"}, args...)
+	exec.Command("iptables", add...).Run()
+}
+
+func deleteBridgeMasquerade(subnet string) {
+	for exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-o", "eth+", "-j", "MASQUERADE").Run() == nil {
+	}
+}
+
+func applyPublicIPv4SNAT(c *config.Container, tag string) {
+	if c == nil || strings.TrimSpace(c.IP) == "" {
+		return
+	}
+	assignment, ok := primaryPublicIPv4Assignment(c)
+	if !ok {
+		return
+	}
+	hostIP := strings.TrimSpace(assignment.Address)
+	if hostIP == "" {
+		return
+	}
+	iface := strings.TrimSpace(assignment.Interface)
+	if iface == "" {
+		if info, ok := publicIPv4InfoByAddress(hostIP); ok {
+			iface = strings.TrimSpace(info.Interface)
+		}
+	}
+	if iface == "" {
+		if host := DetectPublicIPv4(); host.Interface != "" {
+			iface = host.Interface
+		}
+	}
+	args := []string{
+		"-t", "nat",
+		"-I", "POSTROUTING", "1",
+		"-s", c.IP + "/32",
+	}
+	if iface != "" {
+		args = append(args, "-o", iface)
+	}
+	args = append(args,
+		"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-snat-%s", tag, natRuleIPTag(hostIP)),
+		"-j", "SNAT", "--to-source", hostIP,
+	)
+	if output, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
+		fmt.Printf("Warning: failed to apply public IPv4 SNAT %s -> %s: %v, output: %s\n", c.IP, hostIP, err, string(output))
+	}
+}
+
+func primaryPublicIPv4Assignment(c *config.Container) (config.PublicIPv4Assignment, bool) {
+	if c == nil {
+		return config.PublicIPv4Assignment{}, false
+	}
+	for _, item := range c.PublicIPv4s {
+		if strings.TrimSpace(item.Address) != "" {
+			return item, true
+		}
+	}
+	return config.PublicIPv4Assignment{}, false
+}
+
 func clicdTag(id int) string { return "c" + strconv.Itoa(id) }
+
+func EnsureAllRunningPortMappings() {
+	m := NewManager()
+	for i := range config.AppConfig.Containers {
+		c := &config.AppConfig.Containers[i]
+		if c.Status != "running" || strings.TrimSpace(c.IP) == "" {
+			continue
+		}
+		if err := m.ApplyPortMappings(c.ID); err != nil {
+			fmt.Printf("Warning: failed to restore port mappings for %s: %v\n", c.Name, err)
+		}
+	}
+}
 
 // EnsureForwardRules makes sure iptables FORWARD chain allows bridge traffic.
 func EnsureForwardRules(bridge string) {
@@ -81,8 +229,13 @@ func EnsureForwardRules(bridge string) {
 // CleanPortMappings removes all iptables rules for a container
 func (m *Manager) CleanPortMappings(id int) error {
 	tag := clicdTag(id)
+	for _, chain := range []string{"PREROUTING", "POSTROUTING"} {
+		cmd := exec.Command("sh", "-c",
+			fmt.Sprintf("iptables -t nat -L %s -n --line-numbers 2>/dev/null | grep 'clicd-%s-' | awk '{print $1}' | sort -rn | while read num; do iptables -t nat -D %s $num; done", chain, tag, chain))
+		cmd.Run()
+	}
 	cmd := exec.Command("sh", "-c",
-		fmt.Sprintf("iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep 'clicd-%s' | awk '{print $1}' | sort -rn | while read num; do iptables -t nat -D PREROUTING $num; done", tag))
+		fmt.Sprintf("iptables -S FORWARD 2>/dev/null | grep 'clicd-%s-' | sed 's/^-A /-D /' | while read rule; do iptables $rule; done", tag))
 	cmd.Run()
 	return nil
 }
@@ -94,11 +247,25 @@ func SetupDefaultPortMappings(sshPort int) []config.PortMapping {
 	}
 }
 
+func DefaultPortMappingHostIP(assignments []config.PublicIPv4Assignment) string {
+	if len(assignments) == 1 {
+		return strings.TrimSpace(assignments[0].Address)
+	}
+	return ""
+}
+
+func defaultPortMappingHostIP(assignments []config.PublicIPv4Assignment) string {
+	return DefaultPortMappingHostIP(assignments)
+}
+
 // AddPortMapping adds a NAT rule to a container
 func (m *Manager) AddPortMapping(id int, pm config.PortMapping) ([]config.PortMapping, error) {
 	c := config.FindContainer(id)
 	if c == nil {
 		return nil, fmt.Errorf("container not found: %d", id)
+	}
+	if c.PortMappingLimit <= 0 {
+		return nil, fmt.Errorf("container has no IPv4 NAT port quota")
 	}
 	if c.PortMappingLimit > 0 && len(c.PortMappings) >= c.PortMappingLimit {
 		return nil, fmt.Errorf("port mapping quota exceeded: %d/%d", len(c.PortMappings), c.PortMappingLimit)
@@ -168,6 +335,17 @@ func normalizePortMapping(c *config.Container, skipIndex int, pm config.PortMapp
 	if pm.Protocol == "" {
 		pm.Protocol = "tcp"
 	}
+	pm.Protocol = strings.ToLower(strings.TrimSpace(pm.Protocol))
+	pm.HostIP = strings.TrimSpace(pm.HostIP)
+	if pm.HostIP != "" {
+		addr, err := netip.ParseAddr(pm.HostIP)
+		if err != nil || !addr.Is4() {
+			return pm, fmt.Errorf("host_ip must be a valid IPv4 address")
+		}
+		if !containerHasPublicIPv4(c, pm.HostIP) {
+			return pm, fmt.Errorf("host_ip %s is not assigned to this container", pm.HostIP)
+		}
+	}
 	if pm.Description == "" {
 		pm.Description = fmt.Sprintf("Port-%d", pm.ContainerPort)
 	}
@@ -179,8 +357,8 @@ func normalizePortMapping(c *config.Container, skipIndex int, pm config.PortMapp
 		if i == skipIndex {
 			continue
 		}
-		if existing.HostPort == pm.HostPort && existing.Protocol == pm.Protocol {
-			return pm, fmt.Errorf("host port %d/%s already mapped in this container", pm.HostPort, pm.Protocol)
+		if portMappingsConflict(c, pm, c, existing) {
+			return pm, fmt.Errorf("host port %d/%s already mapped on the same IPv4 in this container", pm.HostPort, pm.Protocol)
 		}
 	}
 	// Check all other containers (LXC + KVM) for port conflicts
@@ -189,8 +367,9 @@ func normalizePortMapping(c *config.Container, skipIndex int, pm config.PortMapp
 			continue
 		}
 		for _, existing := range oc.PortMappings {
-			if existing.HostPort == pm.HostPort && existing.Protocol == pm.Protocol {
-				return pm, fmt.Errorf("host port %d/%s already used by container %s (ID: %d)", pm.HostPort, pm.Protocol, oc.Name, oc.ID)
+			oc := oc
+			if portMappingsConflict(c, pm, &oc, existing) {
+				return pm, fmt.Errorf("host port %d/%s already used on the same IPv4 by container %s (ID: %d)", pm.HostPort, pm.Protocol, oc.Name, oc.ID)
 			}
 		}
 	}
@@ -204,7 +383,9 @@ func allocateDefaultEqualPorts(c *config.Container, count int) []int {
 	used := map[int]bool{}
 	// Mark current container's ports
 	for _, pm := range c.PortMappings {
-		used[pm.HostPort] = true
+		for _, hostIP := range expandPortMappingHostIPs(c, pm) {
+			used[hostPortKey(hostIP, pm.HostPort)] = true
+		}
 		used[pm.ContainerPort] = true
 	}
 	// Also mark all other containers' host ports (LXC + KVM)
@@ -213,13 +394,17 @@ func allocateDefaultEqualPorts(c *config.Container, count int) []int {
 			continue
 		}
 		for _, pm := range oc.PortMappings {
-			used[pm.HostPort] = true
+			oc := oc
+			for _, hostIP := range expandPortMappingHostIPs(&oc, pm) {
+				used[hostPortKey(hostIP, pm.HostPort)] = true
+			}
 		}
 	}
 	ports := make([]int, 0, count)
 	next := 20000
 	for len(ports) < count {
-		if !used[next] {
+		hostIP := c.PrimaryPublicIPv4()
+		if !used[hostPortKey(hostIP, next)] && !used[next] {
 			ports = append(ports, next)
 		}
 		next++
@@ -228,4 +413,119 @@ func allocateDefaultEqualPorts(c *config.Container, count int) []int {
 		}
 	}
 	return ports
+}
+
+func HostPortAvailable(c *config.Container, hostIP string, hostPort int, protocol string) bool {
+	if c == nil || hostPort <= 0 {
+		return false
+	}
+	pm := config.PortMapping{HostIP: strings.TrimSpace(hostIP), HostPort: hostPort, Protocol: protocol}
+	for _, existing := range c.PortMappings {
+		if portMappingsConflict(c, pm, c, existing) {
+			return false
+		}
+	}
+	for _, oc := range config.AppConfig.Containers {
+		if oc.ID == c.ID {
+			continue
+		}
+		oc := oc
+		for _, existing := range oc.PortMappings {
+			if portMappingsConflict(c, pm, &oc, existing) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func expandPortMappingHostIPs(c *config.Container, pm config.PortMapping) []string {
+	if strings.TrimSpace(pm.HostIP) != "" {
+		return []string{strings.TrimSpace(pm.HostIP)}
+	}
+	if c != nil && len(c.PublicIPv4s) > 0 {
+		values := make([]string, 0, len(c.PublicIPv4s))
+		for _, item := range c.PublicIPv4s {
+			if strings.TrimSpace(item.Address) != "" {
+				values = append(values, strings.TrimSpace(item.Address))
+			}
+		}
+		if len(values) > 0 {
+			return values
+		}
+	}
+	return []string{""}
+}
+
+func containerHasPublicIPv4(c *config.Container, hostIP string) bool {
+	if c == nil {
+		return false
+	}
+	for _, item := range c.PublicIPv4s {
+		if item.Address == hostIP {
+			return true
+		}
+	}
+	return false
+}
+
+func portMappingsConflict(aContainer *config.Container, a config.PortMapping, bContainer *config.Container, b config.PortMapping) bool {
+	if a.HostPort != b.HostPort || !protocolsOverlap(a.Protocol, b.Protocol) {
+		return false
+	}
+	aIPs := expandPortMappingHostIPs(aContainer, a)
+	bIPs := expandPortMappingHostIPs(bContainer, b)
+	for _, aIP := range aIPs {
+		for _, bIP := range bIPs {
+			if aIP == "" || bIP == "" || aIP == bIP {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func protocolsOverlap(a, b string) bool {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if a == "" {
+		a = "tcp"
+	}
+	if b == "" {
+		b = "tcp"
+	}
+	if a == b || a == "all" || b == "all" {
+		return true
+	}
+	return (a == "tcp+udp" && (b == "tcp" || b == "udp")) ||
+		(b == "tcp+udp" && (a == "tcp" || a == "udp"))
+}
+
+func natRuleIPTag(ip string) string {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return "any"
+	}
+	return strings.ReplaceAll(ip, ".", "_")
+}
+
+func displayHostIP(ip string) string {
+	if strings.TrimSpace(ip) == "" {
+		return "host"
+	}
+	return ip
+}
+
+func hostPortKey(hostIP string, port int) int {
+	if hostIP == "" {
+		return port
+	}
+	sum := 0
+	for _, r := range hostIP {
+		sum = sum*31 + int(r)
+	}
+	if sum < 0 {
+		sum = -sum
+	}
+	return port + (sum % 1000000 * 100000)
 }

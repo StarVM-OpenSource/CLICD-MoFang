@@ -17,8 +17,30 @@ import (
 type PortMapping struct {
 	ContainerPort int    `json:"container_port"`
 	HostPort      int    `json:"host_port"`
+	HostIP        string `json:"host_ip,omitempty"`
 	Protocol      string `json:"protocol"`
 	Description   string `json:"description"`
+}
+
+type PublicIPv4Assignment struct {
+	Address   string `json:"address"`
+	Interface string `json:"interface,omitempty"`
+	PrefixLen int    `json:"prefix_len,omitempty"`
+	Gateway   string `json:"gateway,omitempty"`
+}
+
+type IPv6Assignment struct {
+	Address   string `json:"address"`
+	PrefixLen int    `json:"prefix_len"`
+	Interface string `json:"interface,omitempty"`
+}
+
+type PublicIPv6Prefix struct {
+	Address   string `json:"address"`
+	Prefix    string `json:"prefix,omitempty"`
+	PrefixLen int    `json:"prefix_len"`
+	Interface string `json:"interface,omitempty"`
+	Gateway   string `json:"gateway,omitempty"`
 }
 
 // SavedTask for persisting task queue across restarts
@@ -68,50 +90,52 @@ type VMReadinessCheck struct {
 
 // Container represents an LXC container configuration
 type Container struct {
-	ID                            int           `json:"id"`
-	UUID                          string        `json:"uuid"`
-	Name                          string        `json:"name"`
-	Virtualization                string        `json:"virtualization,omitempty"`
-	LXCName                       string        `json:"lxc_name,omitempty"`
-	KVMName                       string        `json:"kvm_name,omitempty"`
-	DiskImage                     string        `json:"disk_image,omitempty"`
-	MACAddress                    string        `json:"mac_address,omitempty"`
-	Template                      string        `json:"template"`
-	VCPU                          float64       `json:"vcpu"`
-	RAMMB                         int           `json:"ram_mb"`
-	DiskGB                        int           `json:"disk_gb"`
-	NetworkBWMbps                 int           `json:"network_bw_mbps"`
-	MonthlyTrafficGB              int           `json:"monthly_traffic_gb"`
-	TrafficMode                   string        `json:"traffic_mode"`   // "total" or "in_out"
-	TrafficInGB                   int           `json:"traffic_in_gb"`  // 0 = unlimited
-	TrafficOutGB                  int           `json:"traffic_out_gb"` // 0 = unlimited
-	TrafficUsedRX                 int64         `json:"traffic_used_rx"`
-	TrafficUsedTX                 int64         `json:"traffic_used_tx"`
-	TrafficResetDate              string        `json:"traffic_reset_date"`
-	IOSpeedMBps                   int           `json:"io_speed_mbps"`
-	Status                        string        `json:"status"`
-	IP                            string        `json:"ip"`
-	IPv6                          string        `json:"ipv6"`
-	IPv6PrefixLen                 int           `json:"ipv6_prefix_len"`
-	IPv6Interface                 string        `json:"ipv6_interface"`
-	VNCPort                       int           `json:"vnc_port"`
-	SSHPort                       int           `json:"ssh_port"`
-	SSHPassword                   string        `json:"ssh_password"`
-	SSHHostKey                    string        `json:"ssh_host_key,omitempty"`
-	PortMappings                  []PortMapping `json:"port_mappings"`
-	PortMappingLimit              int           `json:"port_mapping_limit"`
-	SnapshotLimit                 int           `json:"snapshot_limit"`
-	CreatedAt                     string        `json:"created_at"`
-	ExpiresAt                     string        `json:"expires_at"`
-	SnapshotScheduleEnabled       bool          `json:"snapshot_schedule_enabled"`
-	SnapshotScheduleIntervalHours int           `json:"snapshot_schedule_interval_hours"`
-	SnapshotScheduleTime          string        `json:"snapshot_schedule_time"`
-	SnapshotScheduleLastRun       string        `json:"snapshot_schedule_last_run"`
-	SnapshotScheduleNextRun       string        `json:"snapshot_schedule_next_run"`
-	SnapshotScheduleCreatedBy     string        `json:"snapshot_schedule_created_by"`
-	PolicyBlocked                 bool          `json:"policy_blocked"`
-	PolicyBlockedReason           string        `json:"policy_blocked_reason,omitempty"`
-	PolicyBlockedAt               string        `json:"policy_blocked_at,omitempty"`
+	ID                            int                    `json:"id"`
+	UUID                          string                 `json:"uuid"`
+	Name                          string                 `json:"name"`
+	Virtualization                string                 `json:"virtualization,omitempty"`
+	LXCName                       string                 `json:"lxc_name,omitempty"`
+	KVMName                       string                 `json:"kvm_name,omitempty"`
+	DiskImage                     string                 `json:"disk_image,omitempty"`
+	MACAddress                    string                 `json:"mac_address,omitempty"`
+	Template                      string                 `json:"template"`
+	VCPU                          float64                `json:"vcpu"`
+	RAMMB                         int                    `json:"ram_mb"`
+	DiskGB                        int                    `json:"disk_gb"`
+	NetworkBWMbps                 int                    `json:"network_bw_mbps"`
+	MonthlyTrafficGB              int                    `json:"monthly_traffic_gb"`
+	TrafficMode                   string                 `json:"traffic_mode"`   // "total" or "in_out"
+	TrafficInGB                   int                    `json:"traffic_in_gb"`  // 0 = unlimited
+	TrafficOutGB                  int                    `json:"traffic_out_gb"` // 0 = unlimited
+	TrafficUsedRX                 int64                  `json:"traffic_used_rx"`
+	TrafficUsedTX                 int64                  `json:"traffic_used_tx"`
+	TrafficResetDate              string                 `json:"traffic_reset_date"`
+	IOSpeedMBps                   int                    `json:"io_speed_mbps"`
+	Status                        string                 `json:"status"`
+	IP                            string                 `json:"ip"`
+	PublicIPv4s                   []PublicIPv4Assignment `json:"public_ipv4s,omitempty"`
+	IPv6                          string                 `json:"ipv6"`
+	IPv6PrefixLen                 int                    `json:"ipv6_prefix_len"`
+	IPv6Interface                 string                 `json:"ipv6_interface"`
+	IPv6Addresses                 []IPv6Assignment       `json:"ipv6_addresses,omitempty"`
+	VNCPort                       int                    `json:"vnc_port"`
+	SSHPort                       int                    `json:"ssh_port"`
+	SSHPassword                   string                 `json:"ssh_password"`
+	SSHHostKey                    string                 `json:"ssh_host_key,omitempty"`
+	PortMappings                  []PortMapping          `json:"port_mappings"`
+	PortMappingLimit              int                    `json:"port_mapping_limit"`
+	SnapshotLimit                 int                    `json:"snapshot_limit"`
+	CreatedAt                     string                 `json:"created_at"`
+	ExpiresAt                     string                 `json:"expires_at"`
+	SnapshotScheduleEnabled       bool                   `json:"snapshot_schedule_enabled"`
+	SnapshotScheduleIntervalHours int                    `json:"snapshot_schedule_interval_hours"`
+	SnapshotScheduleTime          string                 `json:"snapshot_schedule_time"`
+	SnapshotScheduleLastRun       string                 `json:"snapshot_schedule_last_run"`
+	SnapshotScheduleNextRun       string                 `json:"snapshot_schedule_next_run"`
+	SnapshotScheduleCreatedBy     string                 `json:"snapshot_schedule_created_by"`
+	PolicyBlocked                 bool                   `json:"policy_blocked"`
+	PolicyBlockedReason           string                 `json:"policy_blocked_reason,omitempty"`
+	PolicyBlockedAt               string                 `json:"policy_blocked_at,omitempty"`
 }
 
 const (
@@ -134,6 +158,101 @@ func (c *Container) Runtime() string {
 
 func (c *Container) IsKVM() bool {
 	return c.Runtime() == VirtualizationKVM
+}
+
+func (c *Container) NormalizeNetworkAssignments() bool {
+	changed := false
+	seenIPv4 := map[string]bool{}
+	filteredIPv4 := make([]PublicIPv4Assignment, 0, len(c.PublicIPv4s))
+	for _, item := range c.PublicIPv4s {
+		item.Address = strings.TrimSpace(item.Address)
+		item.Interface = strings.TrimSpace(item.Interface)
+		item.Gateway = strings.TrimSpace(item.Gateway)
+		if item.Address == "" || seenIPv4[item.Address] {
+			if item.Address != "" {
+				changed = true
+			}
+			continue
+		}
+		seenIPv4[item.Address] = true
+		filteredIPv4 = append(filteredIPv4, item)
+	}
+	if len(filteredIPv4) != len(c.PublicIPv4s) {
+		changed = true
+	}
+	c.PublicIPv4s = filteredIPv4
+
+	seenIPv6 := map[string]bool{}
+	filteredIPv6 := make([]IPv6Assignment, 0, len(c.IPv6Addresses)+1)
+	for _, item := range c.IPv6Addresses {
+		item.Address = strings.TrimSpace(item.Address)
+		item.Interface = strings.TrimSpace(item.Interface)
+		if item.Address == "" || seenIPv6[item.Address] {
+			if item.Address != "" {
+				changed = true
+			}
+			continue
+		}
+		seenIPv6[item.Address] = true
+		filteredIPv6 = append(filteredIPv6, item)
+	}
+	if strings.TrimSpace(c.IPv6) != "" && !seenIPv6[c.IPv6] {
+		filteredIPv6 = append([]IPv6Assignment{{
+			Address:   c.IPv6,
+			PrefixLen: c.IPv6PrefixLen,
+			Interface: c.IPv6Interface,
+		}}, filteredIPv6...)
+		changed = true
+	}
+	if len(filteredIPv6) != len(c.IPv6Addresses) {
+		changed = true
+	}
+	c.IPv6Addresses = filteredIPv6
+	if len(c.IPv6Addresses) > 0 {
+		first := c.IPv6Addresses[0]
+		if c.IPv6 != first.Address || c.IPv6PrefixLen != first.PrefixLen || c.IPv6Interface != first.Interface {
+			c.IPv6 = first.Address
+			c.IPv6PrefixLen = first.PrefixLen
+			c.IPv6Interface = first.Interface
+			changed = true
+		}
+	} else if c.IPv6 != "" || c.IPv6PrefixLen != 0 || c.IPv6Interface != "" {
+		c.IPv6 = ""
+		c.IPv6PrefixLen = 0
+		c.IPv6Interface = ""
+		changed = true
+	}
+	return changed
+}
+
+func (c *Container) PublicIPv4Addresses() []string {
+	values := make([]string, 0, len(c.PublicIPv4s))
+	for _, item := range c.PublicIPv4s {
+		if item.Address != "" {
+			values = append(values, item.Address)
+		}
+	}
+	return values
+}
+
+func (c *Container) PrimaryPublicIPv4() string {
+	if len(c.PublicIPv4s) == 0 {
+		return ""
+	}
+	return c.PublicIPv4s[0].Address
+}
+
+func (c *Container) IPv6AddressStrings() []string {
+	values := make([]string, 0, len(c.IPv6Addresses))
+	for _, item := range c.IPv6Addresses {
+		if item.Address != "" {
+			values = append(values, item.Address)
+		}
+	}
+	if len(values) == 0 && c.IPv6 != "" {
+		values = append(values, c.IPv6)
+	}
+	return values
 }
 
 // LxcName returns the internal LXC container name (ct-{id})
@@ -225,27 +344,29 @@ type SSLConfig struct {
 
 // ClicdConfig is the main configuration structure
 type ClicdConfig struct {
-	AdminUser            string               `json:"admin_user"`
-	AdminPassHash        string               `json:"admin_pass_hash"`
-	JWTSecret            string               `json:"jwt_secret"`
-	Port                 int                  `json:"port"`
-	DataDir              string               `json:"data_dir"`
-	Containers           []Container          `json:"containers"`
-	NextContainerID      int                  `json:"next_container_id"`
-	NextVNCPort          int                  `json:"next_vnc_port"`
-	NextSSHPort          int                  `json:"next_ssh_port"`
-	SetupComplete        bool                 `json:"setup_complete"`
-	SubUsers             []SubUser            `json:"sub_users"`
-	ApiKeys              []ApiKeyConfig       `json:"api_keys"`
-	AuditLogs            []AuditLog           `json:"audit_logs"`
-	Tasks                []SavedTask          `json:"tasks"`
-	LoginLogs            []SavedLoginLog      `json:"login_logs"`
-	EnabledImages        []string             `json:"enabled_images"`
-	Snapshots            []Snapshot           `json:"snapshots"`
-	SecurityAutoShutdown bool                 `json:"security_auto_shutdown"`
-	Language             string               `json:"language"`
-	SSL                  SSLConfig            `json:"ssl"`
-	SSLCertificates      map[string]SSLConfig `json:"ssl_certificates"`
+	AdminUser            string                 `json:"admin_user"`
+	AdminPassHash        string                 `json:"admin_pass_hash"`
+	JWTSecret            string                 `json:"jwt_secret"`
+	Port                 int                    `json:"port"`
+	DataDir              string                 `json:"data_dir"`
+	Containers           []Container            `json:"containers"`
+	NextContainerID      int                    `json:"next_container_id"`
+	NextVNCPort          int                    `json:"next_vnc_port"`
+	NextSSHPort          int                    `json:"next_ssh_port"`
+	SetupComplete        bool                   `json:"setup_complete"`
+	SubUsers             []SubUser              `json:"sub_users"`
+	ApiKeys              []ApiKeyConfig         `json:"api_keys"`
+	AuditLogs            []AuditLog             `json:"audit_logs"`
+	Tasks                []SavedTask            `json:"tasks"`
+	LoginLogs            []SavedLoginLog        `json:"login_logs"`
+	EnabledImages        []string               `json:"enabled_images"`
+	Snapshots            []Snapshot             `json:"snapshots"`
+	PublicIPv4Pool       []PublicIPv4Assignment `json:"public_ipv4_pool"`
+	PublicIPv6Prefixes   []PublicIPv6Prefix     `json:"public_ipv6_prefixes"`
+	SecurityAutoShutdown bool                   `json:"security_auto_shutdown"`
+	Language             string                 `json:"language"`
+	SSL                  SSLConfig              `json:"ssl"`
+	SSLCertificates      map[string]SSLConfig   `json:"ssl_certificates"`
 }
 
 var configPath string
@@ -359,21 +480,23 @@ func InitConfig() (*ClicdConfig, error) {
 	}
 
 	AppConfig = &ClicdConfig{
-		AdminUser:       adminUser,
-		AdminPassHash:   string(hash),
-		JWTSecret:       jwtSecret,
-		Port:            8999,
-		DataDir:         dataDir,
-		Containers:      []Container{},
-		NextContainerID: 1,
-		NextVNCPort:     5900,
-		NextSSHPort:     22000,
-		SetupComplete:   false,
-		SubUsers:        []SubUser{},
-		AuditLogs:       []AuditLog{},
-		Tasks:           []SavedTask{},
-		LoginLogs:       []SavedLoginLog{},
-		Snapshots:       []Snapshot{},
+		AdminUser:          adminUser,
+		AdminPassHash:      string(hash),
+		JWTSecret:          jwtSecret,
+		Port:               8999,
+		DataDir:            dataDir,
+		Containers:         []Container{},
+		NextContainerID:    1,
+		NextVNCPort:        5900,
+		NextSSHPort:        22000,
+		SetupComplete:      false,
+		SubUsers:           []SubUser{},
+		AuditLogs:          []AuditLog{},
+		Tasks:              []SavedTask{},
+		LoginLogs:          []SavedLoginLog{},
+		Snapshots:          []Snapshot{},
+		PublicIPv4Pool:     []PublicIPv4Assignment{},
+		PublicIPv6Prefixes: []PublicIPv6Prefix{},
 	}
 
 	if err := SaveConfig(); err != nil {
@@ -422,6 +545,14 @@ func normalizeConfigDefaults(dataDir string) bool {
 	}
 	if AppConfig.Snapshots == nil {
 		AppConfig.Snapshots = make([]Snapshot, 0)
+		changed = true
+	}
+	if AppConfig.PublicIPv4Pool == nil {
+		AppConfig.PublicIPv4Pool = make([]PublicIPv4Assignment, 0)
+		changed = true
+	}
+	if AppConfig.PublicIPv6Prefixes == nil {
+		AppConfig.PublicIPv6Prefixes = make([]PublicIPv6Prefix, 0)
 		changed = true
 	}
 	if AppConfig.SubUsers == nil {
@@ -546,6 +677,9 @@ func migrateLoadedConfig() bool {
 	if ensureContainerSnapshotLimits() {
 		changed = true
 	}
+	if ensureContainerNetworkAssignments() {
+		changed = true
+	}
 	if ensureContainerSnapshotScheduleDefaults() {
 		changed = true
 	}
@@ -608,12 +742,15 @@ func ensureContainerUUIDs() bool {
 func ensureContainerPortMappingLimits() bool {
 	changed := false
 	for i := range AppConfig.Containers {
-		if AppConfig.Containers[i].PortMappingLimit <= 0 {
+		if AppConfig.Containers[i].PortMappingLimit < 0 {
 			limit := len(AppConfig.Containers[i].PortMappings)
 			if limit < 2 {
 				limit = 2
 			}
 			AppConfig.Containers[i].PortMappingLimit = limit
+			changed = true
+		} else if AppConfig.Containers[i].PortMappingLimit == 0 && len(AppConfig.Containers[i].PortMappings) > 0 {
+			AppConfig.Containers[i].PortMappingLimit = len(AppConfig.Containers[i].PortMappings)
 			changed = true
 		}
 	}
@@ -625,6 +762,16 @@ func ensureContainerSnapshotLimits() bool {
 	for i := range AppConfig.Containers {
 		if AppConfig.Containers[i].SnapshotLimit <= 0 {
 			AppConfig.Containers[i].SnapshotLimit = DefaultSnapshotLimit
+			changed = true
+		}
+	}
+	return changed
+}
+
+func ensureContainerNetworkAssignments() bool {
+	changed := false
+	for i := range AppConfig.Containers {
+		if AppConfig.Containers[i].NormalizeNetworkAssignments() {
 			changed = true
 		}
 	}

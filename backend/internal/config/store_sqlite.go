@@ -20,24 +20,30 @@ var (
 )
 
 type savedTaskConfig struct {
-	Name             string  `json:"name"`
-	Virtualization   string  `json:"virtualization,omitempty"`
-	TemplateID       string  `json:"template_id"`
-	VCPU             float64 `json:"vcpu"`
-	CPUPercent       int     `json:"cpu_percent"`
-	RAMMB            int     `json:"ram_mb"`
-	DiskGB           int     `json:"disk_gb"`
-	NetworkBWMbps    int     `json:"network_bw_mbps"`
-	MonthlyTrafficGB int     `json:"monthly_traffic_gb"`
-	TrafficMode      string  `json:"traffic_mode"`
-	TrafficInGB      int     `json:"traffic_in_gb"`
-	TrafficOutGB     int     `json:"traffic_out_gb"`
-	IOSpeedMBps      int     `json:"io_speed_mbps"`
-	ExtraPorts       []int   `json:"extra_ports"`
-	PortMappingCount int     `json:"port_mapping_count"`
-	SnapshotLimit    int     `json:"snapshot_limit"`
-	AssignIPv6       bool    `json:"assign_ipv6"`
-	ExpiresAt        string  `json:"expires_at"`
+	Name             string   `json:"name"`
+	Virtualization   string   `json:"virtualization,omitempty"`
+	TemplateID       string   `json:"template_id"`
+	VCPU             float64  `json:"vcpu"`
+	CPUPercent       int      `json:"cpu_percent"`
+	RAMMB            int      `json:"ram_mb"`
+	DiskGB           int      `json:"disk_gb"`
+	NetworkBWMbps    int      `json:"network_bw_mbps"`
+	MonthlyTrafficGB int      `json:"monthly_traffic_gb"`
+	TrafficMode      string   `json:"traffic_mode"`
+	TrafficInGB      int      `json:"traffic_in_gb"`
+	TrafficOutGB     int      `json:"traffic_out_gb"`
+	IOSpeedMBps      int      `json:"io_speed_mbps"`
+	ExtraPorts       []int    `json:"extra_ports"`
+	PortMappingCount int      `json:"port_mapping_count"`
+	AssignNAT        *bool    `json:"assign_nat,omitempty"`
+	SnapshotLimit    int      `json:"snapshot_limit"`
+	AssignIPv4       bool     `json:"assign_ipv4"`
+	IPv4Count        int      `json:"ipv4_count,omitempty"`
+	PublicIPv4s      []string `json:"public_ipv4s,omitempty"`
+	AssignIPv6       bool     `json:"assign_ipv6"`
+	IPv6Count        int      `json:"ipv6_count,omitempty"`
+	IPv6Addresses    []string `json:"ipv6_addresses,omitempty"`
+	ExpiresAt        string   `json:"expires_at"`
 }
 
 func parseSavedTaskConfig(raw string) savedTaskConfig {
@@ -175,8 +181,26 @@ func ensureSchema() error {
 			position INTEGER NOT NULL,
 			container_port INTEGER NOT NULL,
 			host_port INTEGER NOT NULL,
+			host_ip TEXT,
 			protocol TEXT,
 			description TEXT,
+			PRIMARY KEY (container_id, position)
+		)`,
+		`CREATE TABLE IF NOT EXISTS container_public_ipv4s (
+			container_id INTEGER NOT NULL,
+			position INTEGER NOT NULL,
+			address TEXT NOT NULL,
+			interface TEXT,
+			prefix_len INTEGER,
+			gateway TEXT,
+			PRIMARY KEY (container_id, position)
+		)`,
+		`CREATE TABLE IF NOT EXISTS container_ipv6_addresses (
+			container_id INTEGER NOT NULL,
+			position INTEGER NOT NULL,
+			address TEXT NOT NULL,
+			prefix_len INTEGER,
+			interface TEXT,
 			PRIMARY KEY (container_id, position)
 		)`,
 		`CREATE TABLE IF NOT EXISTS sub_users (
@@ -253,8 +277,14 @@ func ensureSchema() error {
 			cfg_traffic_out_gb INTEGER,
 			cfg_io_speed_mbps INTEGER,
 			cfg_port_mapping_count INTEGER,
+			cfg_assign_nat INTEGER,
 			cfg_snapshot_limit INTEGER,
+			cfg_assign_ipv4 INTEGER,
+			cfg_ipv4_count INTEGER,
+			cfg_public_ipv4s TEXT,
 			cfg_assign_ipv6 INTEGER,
+			cfg_ipv6_count INTEGER,
+			cfg_ipv6_addresses TEXT,
 			cfg_expires_at TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS task_extra_ports (
@@ -308,6 +338,15 @@ func ensureSchemaMigrations() error {
 		{"api_keys", "last_used_ip", "TEXT"},
 		{"tasks", "ip", "TEXT"},
 		{"tasks", "user_agent", "TEXT"},
+		{"tasks", "cfg_assign_ipv4", "INTEGER"},
+		{"tasks", "cfg_ipv4_count", "INTEGER"},
+		{"tasks", "cfg_public_ipv4s", "TEXT"},
+		{"tasks", "cfg_assign_nat", "INTEGER"},
+		{"tasks", "cfg_ipv6_count", "INTEGER"},
+		{"tasks", "cfg_ipv6_addresses", "TEXT"},
+		{"port_mappings", "host_ip", "TEXT"},
+		{"container_public_ipv4s", "prefix_len", "INTEGER"},
+		{"container_public_ipv4s", "gateway", "TEXT"},
 	} {
 		if err := ensureColumn(column.table, column.name, column.def); err != nil {
 			return err
@@ -381,6 +420,12 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 	if raw := strings.TrimSpace(meta["ssl_certificates"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.SSLCertificates)
 	}
+	if raw := strings.TrimSpace(meta["public_ipv4_pool"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg.PublicIPv4Pool)
+	}
+	if raw := strings.TrimSpace(meta["public_ipv6_prefixes"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg.PublicIPv6Prefixes)
+	}
 
 	if cfg.Containers, err = loadContainers(); err != nil {
 		return nil, false, err
@@ -424,6 +469,8 @@ func saveConfigToDB() error {
 
 	for _, table := range []string{
 		"port_mappings",
+		"container_public_ipv4s",
+		"container_ipv6_addresses",
 		"sub_user_container_names",
 		"sub_user_container_uuids",
 		"containers",
@@ -475,6 +522,8 @@ func saveConfigToDB() error {
 func saveMeta(tx *sql.Tx) error {
 	sslJSON, _ := json.Marshal(AppConfig.SSL)
 	sslCertificatesJSON, _ := json.Marshal(AppConfig.SSLCertificates)
+	publicIPv4PoolJSON, _ := json.Marshal(AppConfig.PublicIPv4Pool)
+	publicIPv6PrefixesJSON, _ := json.Marshal(AppConfig.PublicIPv6Prefixes)
 	values := map[string]string{
 		"admin_user":             AppConfig.AdminUser,
 		"admin_pass_hash":        AppConfig.AdminPassHash,
@@ -489,6 +538,8 @@ func saveMeta(tx *sql.Tx) error {
 		"language":               NormalizeLanguage(AppConfig.Language),
 		"ssl":                    string(sslJSON),
 		"ssl_certificates":       string(sslCertificatesJSON),
+		"public_ipv4_pool":       string(publicIPv4PoolJSON),
+		"public_ipv6_prefixes":   string(publicIPv6PrefixesJSON),
 		"schema_version":         "1",
 		"updated_at":             time.Now().Format("2006-01-02 15:04:05"),
 	}
@@ -524,8 +575,20 @@ func saveContainers(tx *sql.Tx) error {
 			return err
 		}
 		for i, pm := range c.PortMappings {
-			if _, err := tx.Exec(`INSERT INTO port_mappings(container_id, position, container_port, host_port, protocol, description)
-				VALUES (?, ?, ?, ?, ?, ?)`, c.ID, i, pm.ContainerPort, pm.HostPort, pm.Protocol, pm.Description); err != nil {
+			if _, err := tx.Exec(`INSERT INTO port_mappings(container_id, position, container_port, host_port, host_ip, protocol, description)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`, c.ID, i, pm.ContainerPort, pm.HostPort, pm.HostIP, pm.Protocol, pm.Description); err != nil {
+				return err
+			}
+		}
+		for i, ip := range c.PublicIPv4s {
+			if _, err := tx.Exec(`INSERT INTO container_public_ipv4s(container_id, position, address, interface, prefix_len, gateway)
+				VALUES (?, ?, ?, ?, ?, ?)`, c.ID, i, ip.Address, ip.Interface, ip.PrefixLen, ip.Gateway); err != nil {
+				return err
+			}
+		}
+		for i, ip := range c.IPv6Addresses {
+			if _, err := tx.Exec(`INSERT INTO container_ipv6_addresses(container_id, position, address, prefix_len, interface)
+				VALUES (?, ?, ?, ?, ?)`, c.ID, i, ip.Address, ip.PrefixLen, ip.Interface); err != nil {
 				return err
 			}
 		}
@@ -590,14 +653,16 @@ func saveTasksDB(tx *sql.Tx) error {
 			id, type, container_id, container_name, status, error, created_at, template_id, user, ip, user_agent,
 			cfg_name, cfg_virtualization, cfg_template_id, cfg_vcpu, cfg_cpu_percent, cfg_ram_mb, cfg_disk_gb,
 			cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
-			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_snapshot_limit,
-			cfg_assign_ipv6, cfg_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
+			cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
+			cfg_expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
 			cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
 			cfg.NetworkBWMbps, cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
-			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.PortMappingCount, cfg.SnapshotLimit,
-			boolInt(cfg.AssignIPv6), cfg.ExpiresAt,
+			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.SnapshotLimit,
+			boolInt(cfg.AssignIPv4), cfg.IPv4Count, encodeStringSlice(cfg.PublicIPv4s),
+			boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses), cfg.ExpiresAt,
 		); err != nil {
 			return err
 		}
@@ -686,12 +751,21 @@ func loadContainers() ([]Container, error) {
 		if err != nil {
 			return nil, err
 		}
+		result[i].PublicIPv4s, err = loadContainerPublicIPv4s(result[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		result[i].IPv6Addresses, err = loadContainerIPv6Addresses(result[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		result[i].NormalizeNetworkAssignments()
 	}
 	return result, nil
 }
 
 func loadPortMappings(containerID int) ([]PortMapping, error) {
-	rows, err := db.Query(`SELECT container_port, host_port, protocol, description FROM port_mappings WHERE container_id = ? ORDER BY position`, containerID)
+	rows, err := db.Query(`SELECT container_port, host_port, host_ip, protocol, description FROM port_mappings WHERE container_id = ? ORDER BY position`, containerID)
 	if err != nil {
 		return nil, err
 	}
@@ -699,10 +773,60 @@ func loadPortMappings(containerID int) ([]PortMapping, error) {
 	result := []PortMapping{}
 	for rows.Next() {
 		var pm PortMapping
-		if err := rows.Scan(&pm.ContainerPort, &pm.HostPort, &pm.Protocol, &pm.Description); err != nil {
+		var hostIP sql.NullString
+		if err := rows.Scan(&pm.ContainerPort, &pm.HostPort, &hostIP, &pm.Protocol, &pm.Description); err != nil {
 			return nil, err
 		}
+		pm.HostIP = hostIP.String
 		result = append(result, pm)
+	}
+	return result, rows.Err()
+}
+
+func loadContainerPublicIPv4s(containerID int) ([]PublicIPv4Assignment, error) {
+	rows, err := db.Query(`SELECT address, interface, prefix_len, gateway FROM container_public_ipv4s WHERE container_id = ? ORDER BY position`, containerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []PublicIPv4Assignment{}
+	for rows.Next() {
+		var item PublicIPv4Assignment
+		var iface sql.NullString
+		var prefixLen sql.NullInt64
+		var gateway sql.NullString
+		if err := rows.Scan(&item.Address, &iface, &prefixLen, &gateway); err != nil {
+			return nil, err
+		}
+		item.Interface = iface.String
+		if prefixLen.Valid {
+			item.PrefixLen = int(prefixLen.Int64)
+		}
+		item.Gateway = gateway.String
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func loadContainerIPv6Addresses(containerID int) ([]IPv6Assignment, error) {
+	rows, err := db.Query(`SELECT address, prefix_len, interface FROM container_ipv6_addresses WHERE container_id = ? ORDER BY position`, containerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []IPv6Assignment{}
+	for rows.Next() {
+		var item IPv6Assignment
+		var prefixLen sql.NullInt64
+		var iface sql.NullString
+		if err := rows.Scan(&item.Address, &prefixLen, &iface); err != nil {
+			return nil, err
+		}
+		if prefixLen.Valid {
+			item.PrefixLen = int(prefixLen.Int64)
+		}
+		item.Interface = iface.String
+		result = append(result, item)
 	}
 	return result, rows.Err()
 }
@@ -808,8 +932,9 @@ func loadTasks() ([]SavedTask, error) {
 		id, type, container_id, container_name, status, error, created_at, template_id, user, ip, user_agent,
 		cfg_name, cfg_virtualization, cfg_template_id, cfg_vcpu, cfg_cpu_percent, cfg_ram_mb, cfg_disk_gb,
 		cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
-		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_snapshot_limit,
-		cfg_assign_ipv6, cfg_expires_at
+		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
+		cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
+		cfg_expires_at
 		FROM tasks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -820,20 +945,34 @@ func loadTasks() ([]SavedTask, error) {
 	for rows.Next() {
 		var t SavedTask
 		var cfg savedTaskConfig
-		var assignIPv6 int
-		var ip, userAgent sql.NullString
+		var assignIPv4, assignIPv6 int
+		var ip, userAgent, publicIPv4s, ipv6Addresses sql.NullString
+		var assignNAT, ipv4Count, ipv6Count sql.NullInt64
 		if err := rows.Scan(
 			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User, &ip, &userAgent,
 			&cfg.Name, &cfg.Virtualization, &cfg.TemplateID, &cfg.VCPU, &cfg.CPUPercent, &cfg.RAMMB, &cfg.DiskGB,
 			&cfg.NetworkBWMbps, &cfg.MonthlyTrafficGB, &cfg.TrafficMode, &cfg.TrafficInGB,
-			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.PortMappingCount, &cfg.SnapshotLimit,
-			&assignIPv6, &cfg.ExpiresAt,
+			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.PortMappingCount, &assignNAT, &cfg.SnapshotLimit,
+			&assignIPv4, &ipv4Count, &publicIPv4s, &assignIPv6, &ipv6Count, &ipv6Addresses, &cfg.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
 		t.IP = ip.String
 		t.UserAgent = userAgent.String
+		if assignNAT.Valid {
+			value := assignNAT.Int64 != 0
+			cfg.AssignNAT = &value
+		}
+		cfg.AssignIPv4 = assignIPv4 != 0
+		if ipv4Count.Valid {
+			cfg.IPv4Count = int(ipv4Count.Int64)
+		}
+		cfg.PublicIPv4s = decodeStringSlice(publicIPv4s.String)
 		cfg.AssignIPv6 = assignIPv6 != 0
+		if ipv6Count.Valid {
+			cfg.IPv6Count = int(ipv6Count.Int64)
+		}
+		cfg.IPv6Addresses = decodeStringSlice(ipv6Addresses.String)
 		result = append(result, t)
 		configs = append(configs, cfg)
 	}
@@ -945,6 +1084,13 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func boolPtrInt(value *bool) interface{} {
+	if value == nil {
+		return nil
+	}
+	return boolInt(*value)
 }
 
 func btoa(value bool) string {

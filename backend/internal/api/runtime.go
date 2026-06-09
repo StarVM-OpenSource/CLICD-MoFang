@@ -13,8 +13,14 @@ import (
 
 var kvmManager = kvm.NewManager()
 
+const noNetworkSelectedMessage = "请勾选任意一个可用网络"
+
 func runtimeFromRequest(value string) string {
 	return config.NormalizeVirtualization(value)
+}
+
+func hasRequestedNetwork(cfg lxc.ContainerConfig) bool {
+	return cfg.WantsNAT() || cfg.AssignIPv4 || len(cfg.PublicIPv4s) > 0 || cfg.AssignIPv6 || len(cfg.IPv6Addresses) > 0
 }
 
 func runtimeFromTemplateID(templateID string) string {

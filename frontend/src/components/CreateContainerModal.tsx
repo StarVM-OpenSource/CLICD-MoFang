@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CalendarClock, X } from 'lucide-react'
 import { batchCreate, getIPv6Status, getEnabledImages, getHostInfo, CreateContainerRequest, HostInfo, IPv6Status, Template } from '../services/api'
 import { useDialog } from './Dialog'
+import { useLanguage, type Language } from '../contexts/LanguageContext'
 
 interface CreateContainerModalProps {
   isOpen: boolean
@@ -26,13 +27,21 @@ const defaultForm: CreateContainerRequest = {
   io_speed_mbps: 0,
   extra_ports: [],
   port_mapping_count: 2,
+  assign_nat: true,
   snapshot_limit: 1,
+  assign_ipv4: false,
+  ipv4_count: 1,
+  public_ipv4s: [],
   assign_ipv6: false,
+  ipv6_count: 1,
+  ipv6_addresses: [],
   expires_at: '',
 }
 
 export default function CreateContainerModal({ isOpen, onClose, onSuccess, existingNames = [] }: CreateContainerModalProps) {
   const dialog = useDialog()
+  const { language } = useLanguage()
+  const networkText = createNetworkText[language]
   const [templates, setTemplates] = useState<Template[]>([])
   const [loading, setLoading] = useState(false)
   const [batchCount, setBatchCount] = useState(1)
@@ -74,16 +83,23 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   }, [isOpen, form.virtualization])
 
   const ipv6Available = !!ipv6Status?.available
-  const ipv6Prefix = ipv6Status?.prefixes?.[0]?.prefix || ''
+  const ipv6Prefixes = ipv6Status?.prefixes || []
+  const ipv6Prefix = ipv6Prefixes.length > 1 ? `${ipv6Prefixes.length} prefixes configured` : (ipv6Prefixes[0]?.prefix || '')
+  const publicIPv4s = hostInfo?.network.public_ipv4_addresses || []
+  const ipv4Available = publicIPv4s.length > 0
+  const manualIPv4s = form.public_ipv4s || []
   const maxVCPU = hostInfo?.cpu.cores || 64
   const maxRAMMB = hostInfo?.ram.total_mb ? Number(hostInfo.ram.total_mb) : undefined
   const maxDiskGB = hostInfo?.disk.total_gb ? Math.max(1, Math.floor(hostInfo.disk.total_gb)) : undefined
   const resourceErrors = validateResourceInputs(form, maxVCPU, maxRAMMB, maxDiskGB)
+  const natEnabled = form.assign_nat !== false
+  const natPortCount = natEnabled ? Math.max(2, form.port_mapping_count || 2) : 0
 
   const autoPorts = useMemo(() => {
-    const count = Math.max(2, form.port_mapping_count)
+    if (!natEnabled) return []
+    const count = natPortCount
     return Array.from({ length: count - 1 }, (_, index) => 22002 + index)
-  }, [form.port_mapping_count])
+  }, [natEnabled, natPortCount])
 
   // SSH port preview (will be allocated sequentially, starting around 22000+)
   const sshPortPreview = 22000
@@ -127,7 +143,13 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
       return
     }
 
+    if (!form.assign_ipv4 && !form.assign_ipv6 && form.assign_nat === false) {
+      dialog.alert('提示', '请勾选任意一个可用网络')
+      return
+    }
+
     const boundedForm = normalizeCreateForm(form)
+    const wantsNAT = boundedForm.assign_nat !== false
 
     // Build batch of containers
     const containers: CreateContainerRequest[] = []
@@ -137,8 +159,11 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
       containers.push({
         ...boundedForm,
         name,
-        port_mapping_count: Math.max(2, boundedForm.port_mapping_count || 2),
+        assign_nat: wantsNAT,
+        port_mapping_count: wantsNAT ? Math.max(2, boundedForm.port_mapping_count || 2) : 0,
         snapshot_limit: Math.max(1, boundedForm.snapshot_limit || 3),
+        ipv4_count: boundedForm.assign_ipv4 ? Math.max(1, boundedForm.ipv4_count || 1) : 0,
+        ipv6_count: boundedForm.assign_ipv6 ? Math.max(1, boundedForm.ipv6_count || 1) : 0,
         extra_ports: [],
       })
     }
@@ -229,21 +254,157 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
 
           </Field>
 
-          <label className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm ${ipv6Available ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
-            <input
-              type="checkbox"
-              checked={!!form.assign_ipv6}
-              disabled={!ipv6Available}
-              onChange={(event) => setForm({ ...form, assign_ipv6: event.target.checked })}
-              className="mt-1"
-            />
-            <span className="min-w-0">
-              <span className="block font-medium text-gray-800">Public IPv6</span>
-              <span className="block text-xs text-gray-500 truncate">
-                {ipv6Available ? `Use ${ipv6Prefix}` : (ipv6Status?.reason || 'Checking IPv6 prefix...')}
+          <div className={`rounded-md border px-3 py-2 text-sm ${ipv4Available ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={!!form.assign_ipv4}
+                disabled={!ipv4Available}
+                onChange={(event) => setForm({ ...form, assign_ipv4: event.target.checked, public_ipv4s: event.target.checked ? form.public_ipv4s : [] })}
+                className="mt-1"
+              />
+              <span className="min-w-0">
+                <span className="block font-medium text-gray-800">{networkText.publicIPv4}</span>
+                <span className="block text-xs text-gray-500">
+                  {ipv4Available ? formatAllocatableIPv4Count(publicIPv4s.length, language) : networkText.noAllocatableIPv4}
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+            {form.assign_ipv4 && (
+              <div className="mt-3 space-y-3 pl-6">
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="radio"
+                      checked={manualIPv4s.length === 0}
+                      onChange={() => setForm({ ...form, public_ipv4s: [] })}
+                    />
+                    Auto assign
+                  </label>
+                  <Field label="IPv4 count">
+                    <NumberInput
+                      value={form.ipv4_count || 1}
+                      min={1}
+                      max={Math.max(1, publicIPv4s.length)}
+                      onChange={(value) => setForm({ ...form, ipv4_count: Math.max(1, Math.round(value || 1)) })}
+                    />
+                  </Field>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="radio"
+                      checked={manualIPv4s.length > 0}
+                      onChange={() => setForm({ ...form, public_ipv4s: publicIPv4s[0]?.address ? [publicIPv4s[0].address] : [], ipv4_count: 1 })}
+                    />
+                    Manual select
+                  </label>
+                  {manualIPv4s.length > 0 && (
+                    <div className="grid gap-1.5 sm:grid-cols-2">
+                      {publicIPv4s.map((ip) => (
+                        <label key={`${ip.interface}-${ip.address}`} className="flex min-w-0 items-center gap-2 rounded border border-gray-200 px-2 py-1.5 text-xs text-gray-700">
+                          <input
+                            type="checkbox"
+                            checked={manualIPv4s.includes(ip.address)}
+                            onChange={(event) => {
+                              const next = event.target.checked
+                                ? [...manualIPv4s, ip.address]
+                                : manualIPv4s.filter((value) => value !== ip.address)
+                              setForm({ ...form, public_ipv4s: next, ipv4_count: Math.max(1, next.length || 1) })
+                            }}
+                          />
+                          <span className="truncate font-mono">{ip.address}</span>
+                          <span className="shrink-0 text-gray-400">{ip.interface}</span>
+                          {ip.gateway && <span className="shrink-0 text-gray-400">gw {ip.gateway}</span>}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className={`rounded-md border px-3 py-2 text-sm ${ipv6Available ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
+            <div className="flex items-start justify-between gap-3">
+              <label className="flex min-w-0 flex-1 items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={!!form.assign_ipv6}
+                  disabled={!ipv6Available}
+                  onChange={(event) => setForm({ ...form, assign_ipv6: event.target.checked })}
+                  className="mt-1"
+                />
+                <span className="min-w-0">
+              <span className="block font-medium text-gray-800">{networkText.publicIPv6}</span>
+              <span className="block text-xs text-gray-500 truncate">
+                    {ipv6Available ? `${networkText.use} ${ipv6Prefix}` : (ipv6Status?.reason || networkText.checkingIPv6Prefix)}
+              </span>
+                </span>
+              </label>
+              {form.assign_ipv6 && (
+                <span className="block w-24 shrink-0">
+                  <NumberInput
+                    value={form.ipv6_count || 1}
+                    min={1}
+                    max={64}
+                    onChange={(value) => setForm({ ...form, ipv6_count: Math.max(1, Math.round(value || 1)) })}
+                  />
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm">
+            <div className="flex items-start justify-between gap-3">
+              <label className="flex min-w-0 flex-1 items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={natEnabled}
+                  onChange={(event) => {
+                    const checked = event.target.checked
+                    setForm({
+                      ...form,
+                      assign_nat: checked,
+                      port_mapping_count: checked ? Math.max(2, form.port_mapping_count || 2) : 0,
+                      extra_ports: [],
+                    })
+                  }}
+                  className="mt-1"
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium text-gray-800">{networkText.publicNAT}</span>
+                  <span className="block text-xs text-gray-500">
+                    {natEnabled ? formatNATPortCount(natPortCount, language) : networkText.noNATPorts}
+                  </span>
+                </span>
+              </label>
+              {natEnabled && (
+                <span className="block w-24 shrink-0">
+                  <NumberInput
+                    value={natPortCount}
+                    min={2}
+                    max={64}
+                    onChange={(value) => setForm({ ...form, port_mapping_count: Math.max(2, value || 2), assign_nat: true })}
+                  />
+                </span>
+              )}
+            </div>
+            {natEnabled && (
+              <div className="mt-2 pl-6">
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="inline-flex px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-xs font-mono">
+                    {isWindowsTemplate(form.template_id) ? 'RDP' : 'SSH'}: {sshPortPreview} -&gt; {isWindowsTemplate(form.template_id) ? 3389 : 22}
+                  </span>
+                  {autoPorts.map((port) => (
+                    <span key={port} className="inline-flex px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-mono">
+                      {port} -&gt; {port}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-2 gap-4">
             <Field label="vCPU">
@@ -318,25 +479,6 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               </div>
             )}
           </div>
-
-          <Field label="NAT 端口映射数量">
-            <NumberInput
-              value={form.port_mapping_count}
-              min={2}
-              max={64}
-              onChange={(value) => setForm({ ...form, port_mapping_count: Math.max(2, value || 2) })}
-            />
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              <span className="inline-flex px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-xs font-mono">
-                {isWindowsTemplate(form.template_id) ? 'RDP' : 'SSH'}: {sshPortPreview} -&gt; {isWindowsTemplate(form.template_id) ? 3389 : 22}
-              </span>
-              {autoPorts.map((port) => (
-                <span key={port} className="inline-flex px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-mono">
-                  {port} -&gt; {port}
-                </span>
-              ))}
-            </div>
-          </Field>
 
           <Field label="子用户快照上限">
             <NumberInput
@@ -475,11 +617,22 @@ function validateResourceInputs(form: CreateContainerRequest, maxVCPU: number, m
 
 function normalizeCreateForm(form: CreateContainerRequest): CreateContainerRequest {
   const normalized = applyTemplateDefaults(form)
+  const wantsNAT = normalized.assign_nat !== false
+  const wantsIPv4 = !!normalized.assign_ipv4
+  const wantsIPv6 = !!normalized.assign_ipv6
   return {
     ...normalized,
     vcpu: normalized.virtualization === 'kvm' ? Math.round(normalized.vcpu) : normalizeLXCvCPU(normalized.vcpu),
     ram_mb: Math.round(normalized.ram_mb),
     disk_gb: Math.round(normalized.disk_gb),
+    assign_nat: wantsNAT,
+    port_mapping_count: wantsNAT ? clampInt(normalized.port_mapping_count, 2, 64, 2) : 0,
+    assign_ipv4: wantsIPv4,
+    ipv4_count: wantsIPv4 ? clampInt(normalized.ipv4_count || 1, 1, 64, 1) : 0,
+    public_ipv4s: wantsIPv4 ? (normalized.public_ipv4s || []) : [],
+    assign_ipv6: wantsIPv6,
+    ipv6_count: wantsIPv6 ? clampInt(normalized.ipv6_count || 1, 1, 64, 1) : 0,
+    ipv6_addresses: wantsIPv6 ? (normalized.ipv6_addresses || []) : [],
     snapshot_limit: clampInt(normalized.snapshot_limit, 1, undefined, 3),
   }
 }
@@ -507,6 +660,39 @@ function normalizeLXCvCPU(value: number) {
 function clampInt(value: number, min: number, max?: number, fallback = min) {
   const next = Math.round(Number.isFinite(value) ? value : fallback)
   return Math.min(Math.max(next, min), max ?? next)
+}
+
+const createNetworkText = {
+  zh: {
+    publicIPv4: '公网 IPv4',
+    noAllocatableIPv4: '未检测到可分配公网 IPv4',
+    publicIPv6: '公网 IPv6',
+    use: '使用',
+    checkingIPv6Prefix: '正在检测 IPv6 前缀...',
+    publicNAT: '公网 NAT',
+    noNATPorts: '不分配 NAT 端口',
+  },
+  en: {
+    publicIPv4: 'Public IPv4',
+    noAllocatableIPv4: 'No allocatable public IPv4 detected',
+    publicIPv6: 'Public IPv6',
+    use: 'Use',
+    checkingIPv6Prefix: 'Checking IPv6 prefix...',
+    publicNAT: 'Public NAT',
+    noNATPorts: 'No NAT ports will be assigned',
+  },
+} as const
+
+function formatAllocatableIPv4Count(count: number, language: Language) {
+  return language === 'en'
+    ? `${count} allocatable address${count === 1 ? '' : 'es'} detected`
+    : `检测到 ${count} 个可分配地址`
+}
+
+function formatNATPortCount(count: number, language: Language) {
+  return language === 'en'
+    ? `${count} NAT ports will be assigned`
+    : `将分配 ${count} 个 NAT 端口`
 }
 
 const inputClass =
