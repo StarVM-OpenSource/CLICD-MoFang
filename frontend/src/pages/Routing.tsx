@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Globe2, Network, Pencil, Plus, RefreshCw, Router, Save, Search, Server, Trash2, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useLanguage, type Language } from '../contexts/LanguageContext'
@@ -23,7 +23,8 @@ export default function Routing() {
   const [ipv4EditMode, setIPv4EditMode] = useState<'pool' | 'address'>('pool')
   const [editingIPv4Address, setEditingIPv4Address] = useState('')
   const [savingIPv4, setSavingIPv4] = useState(false)
-  const [ipv4Draft, setIPv4Draft] = useState<PublicIPv4Info[]>([])
+  const [ipv4Draft, setIPv4Draft] = useState<(PublicIPv4Info & { _id: number })[]>([])
+  const nextDraftId = useRef(0)
   const [nat4Page, setNat4Page] = useState(1)
   const [ipv6Page, setIPv6Page] = useState(1)
   const [nat4Search, setNat4Search] = useState('')
@@ -54,7 +55,7 @@ export default function Routing() {
 
   useEffect(() => {
     if (!editingIPv4) {
-      setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip })))
+      setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip, _id: nextDraftId.current++ })))
     }
   }, [editingIPv4, publicIPv4s])
 
@@ -65,14 +66,14 @@ export default function Routing() {
   }, [ipv4Assignments])
 
   const startEditIPv4 = () => {
-    setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip })))
+    setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip, _id: nextDraftId.current++ })))
     setIPv4EditMode('pool')
     setEditingIPv4Address('')
     setEditingIPv4(true)
   }
 
   const startEditIPv4Address = (ip: PublicIPv4Info) => {
-    setIPv4Draft([{ ...ip }])
+    setIPv4Draft([{ ...ip, _id: nextDraftId.current++ }])
     setIPv4EditMode('address')
     setEditingIPv4Address(ip.address)
     setEditingIPv4(true)
@@ -82,13 +83,14 @@ export default function Routing() {
     setEditingIPv4(false)
     setIPv4EditMode('pool')
     setEditingIPv4Address('')
-    setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip })))
+    setIPv4Draft([])
   }
 
   const addIPv4Row = () => {
     setIPv4Draft((items) => [
       ...items,
       {
+        _id: nextDraftId.current++,
         address: '',
         interface: defaultIPv4Interface,
         prefix: '',
@@ -108,7 +110,7 @@ export default function Routing() {
     setSavingIPv4(true)
     try {
       const draftItems = ipv4Draft
-        .map((item) => ({
+        .map(({ _id, ...item }) => ({
           ...item,
           address: (item.address || '').trim(),
           interface: (item.interface || defaultIPv4Interface).trim(),
@@ -285,7 +287,7 @@ export default function Routing() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {ipv4Draft.map((item, index) => (
-                    <tr key={`${item.address}-${index}`}>
+                    <tr key={item._id}>
                       <td className="px-3 py-2"><input value={item.address || ''} onChange={(e) => updateIPv4Draft(index, { address: e.target.value })} placeholder={text.ipv4CIDR} className={smallInputClass} /></td>
                       <td className="px-3 py-2"><input value={item.gateway || ''} onChange={(e) => updateIPv4Draft(index, { gateway: e.target.value })} placeholder={defaultIPv4Gateway || text.gateway} className={smallInputClass} /></td>
                       <td className="px-3 py-2"><input value={item.interface || ''} onChange={(e) => updateIPv4Draft(index, { interface: e.target.value })} placeholder={defaultIPv4Interface} className={smallInputClass} /></td>

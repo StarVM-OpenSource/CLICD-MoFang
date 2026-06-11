@@ -59,9 +59,9 @@ func (m *Manager) ApplyPortMappings(id int) error {
 		}
 	}
 
-	// When container has public IPv4 but no port mappings (independent IP mode),
-	// ensure inbound DNAT for standard service ports (SSH / RDP).
-	if len(c.PortMappings) == 0 && len(c.PublicIPv4s) > 0 {
+	// When container has public IPv4, apply full port passthrough DNAT so the
+	// container owns all ports on its public IP (no NAT management needed).
+	if len(c.PublicIPv4s) > 0 {
 		ensureIndependentIPv4Ingress(c, tag)
 	}
 
@@ -75,40 +75,30 @@ func ensureIndependentIPv4Ingress(c *config.Container, tag string) {
 		return
 	}
 
-	type svcPort struct {
-		port     int
-		protocol string
-		desc     string
-	}
-	servicePorts := []svcPort{{port: 22, protocol: "tcp", desc: "SSH"}}
-	if strings.Contains(strings.ToLower(c.Template), "windows") {
-		servicePorts = []svcPort{{port: 3389, protocol: "tcp", desc: "RDP"}}
-	}
-
 	for _, assignment := range c.PublicIPv4s {
 		hostIP := strings.TrimSpace(assignment.Address)
 		if hostIP == "" {
 			continue
 		}
-		for _, svc := range servicePorts {
+		// Full port passthrough: DNAT all TCP+UDP traffic on this public IP to the container.
+		for _, proto := range []string{"tcp", "udp"} {
 			args := []string{
 				"-t", "nat",
 				"-I", "PREROUTING", "1",
 				"-d", hostIP,
-				"-p", svc.protocol,
-				"--dport", fmt.Sprintf("%d", svc.port),
+				"-p", proto,
 				"-j", "DNAT",
-				"--to-destination", fmt.Sprintf("%s:%d", c.IP, svc.port),
-				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-%d", tag, natRuleIPTag(hostIP), svc.port),
+				"--to-destination", c.IP,
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-all-%s", tag, natRuleIPTag(hostIP), proto),
 			}
 			cmd := exec.Command("iptables", args...)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
-				fmt.Printf("Warning: failed to apply %s ingress %s:%d->%s:%d: %v, output: %s\n",
-					svc.desc, hostIP, svc.port, c.IP, svc.port, err, string(output))
+				fmt.Printf("Warning: failed to apply %s passthrough %s->%s: %v, output: %s\n",
+					proto, hostIP, c.IP, err, string(output))
 				continue
 			}
-			fmt.Printf("%s ingress: %s:%d -> %s:%d\n", svc.desc, hostIP, svc.port, c.IP, svc.port)
+			fmt.Printf("IPv4 passthrough (%s): %s -> %s (all ports)\n", proto, hostIP, c.IP)
 		}
 	}
 }

@@ -773,23 +773,26 @@ export default function ContainerDetail() {
   const maxRAMMB = hostInfo?.ram.total_mb ? Number(hostInfo.ram.total_mb) : undefined
   const hasIndependentIPv4 = assignedIPv4List.length > 0
   const hasIndependentIPv6 = ipv6List.length > 0
-  const hasIndependentIP = hasIndependentIPv4 || hasIndependentIPv6
   const defaultConnPort = isWindows ? 3389 : 22
 
   let publicEndpoint = '-'
   let sshCommand = ''
 
-  if (container.ssh_port > 0) {
+  if (hasIndependentIPv4) {
+    // Direct connection via independent IPv4 — all ports forwarded
+    publicEndpoint = `${assignedIPv4List[0]}:${defaultConnPort}`
+    if (!isWindows) {
+      sshCommand = `ssh root@${assignedIPv4List[0]}`
+    }
+  } else if (hasIndependentIPv6) {
+    publicEndpoint = `[${ipv6List[0]}]:${defaultConnPort}`
+    if (!isWindows) {
+      sshCommand = `ssh root@[${ipv6List[0]}]`
+    }
+  } else if (container.ssh_port > 0) {
     // NAT port mapping mode
     publicEndpoint = `${publicHost}:${container.ssh_port}`
     sshCommand = `ssh -p ${container.ssh_port} root@${publicHost}`
-  } else if (hasIndependentIP) {
-    // Direct connection via independent IPv4 or IPv6
-    const connIP = hasIndependentIPv4 ? assignedIPv4List[0] : `[${ipv6List[0]}]`
-    publicEndpoint = `${connIP}:${defaultConnPort}`
-    if (!isWindows) {
-      sshCommand = `ssh root@${connIP}`
-    }
   }
   const editingSSH = draft.index !== null && !!container.port_mappings?.[draft.index] && (
     container.port_mappings[draft.index].description === 'SSH' || container.port_mappings[draft.index].container_port === 22 ||
@@ -879,7 +882,11 @@ export default function ContainerDetail() {
                 <InfoTag color="blue">系统 {container.template}</InfoTag>
                 <InfoTag color="slate">类型 {(container.virtualization || 'lxc').toUpperCase()}</InfoTag>
                 <InfoTag color="emerald">内网 {container.ip || '-'}</InfoTag>
-                <InfoTag color="amber">IPv4 NAT {hasNATQuota ? `${mappingCount} 条` : '未分配'}</InfoTag>
+                {hasIndependentIPv4 ? (
+                  <InfoTag color="amber">独立 IPv4 {assignedIPv4List[0]}</InfoTag>
+                ) : (
+                  <InfoTag color="amber">IPv4 NAT {hasNATQuota ? `${mappingCount} 条` : '未分配'}</InfoTag>
+                )}
                 <InfoTag color="violet">{isWindows ? 'RDP' : 'SSH'} {publicEndpoint}</InfoTag>
                 {isPolicyBlocked && <InfoTag color="red">策略封禁</InfoTag>}
               </div>
@@ -922,12 +929,14 @@ export default function ContainerDetail() {
                 管理链接
               </ActionButton>
             )}
-            <>
-              <ActionButton disabled={isSubUserPolicyBlocked} onClick={() => setShowNat(true)}>
-                <Settings className="w-3.5 h-3.5" />
-                IPv4 NAT 管理
-              </ActionButton>
-            </>
+            {!hasIndependentIPv4 && (
+              <>
+                <ActionButton disabled={isSubUserPolicyBlocked} onClick={() => setShowNat(true)}>
+                  <Settings className="w-3.5 h-3.5" />
+                  IPv4 NAT 管理
+                </ActionButton>
+              </>
+            )}
             <ActionButton onClick={() => setShowSnapshots(true)} disabled={!!taskStatus || !!snapshotBusy || isSubUserPolicyBlocked}>
               <Camera className="w-3.5 h-3.5" />
               快照
@@ -1437,7 +1446,7 @@ export default function ContainerDetail() {
         </Modal>
       )}
 
-      {showNat && (
+      {showNat && !hasIndependentIPv4 && (
         <Modal title="IPv4 NAT 端口管理" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
           !isSubUser && canAddMapping && (
             <button onClick={openAddMapping} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">

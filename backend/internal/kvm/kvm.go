@@ -432,7 +432,8 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	}
 	ipv6List := configIPv6AssignmentAddresses(ipv6Assignments)
 	ipv4List := configIPv4AssignmentAddresses(publicIPv4s)
-	defaultHostIP := lxc.DefaultPortMappingHostIP(publicIPv4s)
+	// NAT4 port mappings should bind to the host IP, not the VM's independent public IPv4.
+	defaultHostIP := ""
 
 	var xml string
 	winAdminPassword := ""
@@ -1850,8 +1851,7 @@ func windowsIPv6PowerShell(ipv6s []string) string {
 	}
 	return strings.Join([]string{
 		"$clicdIPv6=@(" + strings.Join(quoted, ",") + ")",
-		"$iface=$null",
-		"for ($i=0; $i -lt 60 -and -not $iface; $i++) { $iface=Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Sort-Object ifIndex | Select-Object -First 1; if (-not $iface) { Start-Sleep -Seconds 5 } }",
+		// Reuse $iface already found by the main script
 		"if ($iface) {",
 		"  foreach ($ip in $clicdIPv6) {",
 		"    Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",
@@ -1875,8 +1875,7 @@ func windowsIPv4PowerShell(ipv4s []string) string {
 	}
 	return strings.Join([]string{
 		"$clicdIPv4=@(" + strings.Join(quoted, ",") + ")",
-		"$iface=$null",
-		"for ($i=0; $i -lt 60 -and -not $iface; $i++) { $iface=Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Sort-Object ifIndex | Select-Object -First 1; if (-not $iface) { Start-Sleep -Seconds 5 } }",
+		// Reuse $iface already found by the main script
 		"if ($iface) {",
 		"  foreach ($ip in $clicdIPv4) {",
 		"    Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",

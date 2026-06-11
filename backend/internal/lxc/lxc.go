@@ -345,12 +345,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 
 		// Setup default port mappings (SSH only)
 		portMappings = SetupDefaultPortMappings(sshPort)
-		defaultHostIP := defaultPortMappingHostIP(publicIPv4s)
-		if defaultHostIP != "" {
-			for i := range portMappings {
-				portMappings[i].HostIP = defaultHostIP
-			}
-		}
+		// NAT4 port mappings should bind to the host IP, not the container's independent public IPv4.
 		tempC := &config.Container{ID: id, PublicIPv4s: publicIPv4s, PortMappings: portMappings}
 
 		extraPorts := cfg.ExtraPorts
@@ -364,7 +359,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 			pm, err := normalizePortMapping(tempC, -1, config.PortMapping{
 				ContainerPort: containerPort,
 				HostPort:      containerPort,
-				HostIP:        defaultHostIP,
+				HostIP:        "",
 				Protocol:      "tcp",
 				Description:   fmt.Sprintf("Port-%d", containerPort),
 			})

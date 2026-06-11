@@ -321,7 +321,12 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                 type="checkbox"
                 checked={!!form.assign_ipv4}
                 disabled={!ipv4Available}
-                onChange={(event) => setForm({ ...form, assign_ipv4: event.target.checked, public_ipv4s: event.target.checked ? form.public_ipv4s : [] })}
+                onChange={(event) => setForm({
+                  ...form,
+                  assign_ipv4: event.target.checked,
+                  public_ipv4s: event.target.checked ? form.public_ipv4s : [],
+                  ...(event.target.checked ? { assign_nat: false, port_mapping_count: 0, extra_ports: [] } : {}),
+                })}
                 className="mt-1"
               />
               <span className="min-w-0">
@@ -429,6 +434,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                       assign_nat: checked,
                       port_mapping_count: checked ? Math.max(2, form.port_mapping_count || 2) : 0,
                       extra_ports: [],
+                      ...(checked ? { assign_ipv4: false, public_ipv4s: [], ipv4_count: 0 } : {}),
                     })
                   }}
                   className="mt-1"
@@ -680,9 +686,10 @@ function validateResourceInputs(form: CreateContainerRequest, maxVCPU: number, m
 
 function normalizeCreateForm(form: CreateContainerRequest): CreateContainerRequest {
   const normalized = applyTemplateDefaults(form)
-  const wantsNAT = normalized.assign_nat !== false
   const wantsIPv4 = !!normalized.assign_ipv4
   const wantsIPv6 = !!normalized.assign_ipv6
+  // IPv4 and NAT are mutually exclusive
+  const wantsNAT = wantsIPv4 ? false : normalized.assign_nat !== false
   const linuxTemplate = !isWindowsTemplate(normalized.template_id)
   const sshAuthMode = linuxTemplate ? (normalized.ssh_auth_mode || 'auto_password') : 'auto_password'
   return {
