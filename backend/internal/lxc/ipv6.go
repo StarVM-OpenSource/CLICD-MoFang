@@ -1610,6 +1610,9 @@ func (m *Manager) ApplyIPv6(id int) error {
 			ensureIPv6NAT66(assignment.Address, uplink)
 		}
 	}
+	if err := ApplyFirewallRules(c.ID); err != nil {
+		fmt.Printf("Warning: failed to re-apply firewall rules after IPv6 setup for %s: %v\n", c.Name, err)
+	}
 	return nil
 }
 

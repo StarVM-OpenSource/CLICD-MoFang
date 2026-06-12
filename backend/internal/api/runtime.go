@@ -32,6 +32,7 @@ func runtimeFromTemplateID(templateID string) string {
 
 func createByRuntime(cfg lxc.ContainerConfig) error {
 	cfg.Virtualization = runtimeFromRequest(cfg.Virtualization)
+	cfg.NormalizeResourceAliases()
 	if cfg.Virtualization == config.VirtualizationKVM {
 		return kvmManager.CreateContainer(cfg)
 	}

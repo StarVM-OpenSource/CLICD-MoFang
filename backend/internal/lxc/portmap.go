@@ -67,6 +67,10 @@ func (m *Manager) ApplyPortMappings(id int) error {
 
 	applyIPv4EgressPolicy(c, bridge, subnet, tag)
 
+	if err := ApplyFirewallRules(id); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -260,8 +264,8 @@ func EnsureForwardRules(bridge string) {
 				break
 			}
 		}
-		insertArgs := append([]string{"-I", "FORWARD", "1"}, args...)
-		exec.Command("iptables", insertArgs...).Run()
+		appendArgs := append([]string{"-A", "FORWARD"}, args...)
+		exec.Command("iptables", appendArgs...).Run()
 	}
 }
 
@@ -576,6 +580,9 @@ func CleanFirewallRules(id int) {
 	cmd := exec.Command("bash", "-c",
 		fmt.Sprintf("iptables -S FORWARD 2>/dev/null | grep 'clicd-%s-fw-' | sed 's/^-A /-D /' | while read rule; do iptables $rule; done", tag))
 	cmd.CombinedOutput()
+	cmd = exec.Command("bash", "-c",
+		fmt.Sprintf("ip6tables -S FORWARD 2>/dev/null | grep 'clicd-%s-fw-' | sed 's/^-A /-D /' | while read rule; do ip6tables $rule; done", tag))
+	cmd.CombinedOutput()
 
 	// Also remove legacy default policy rules (without specific rule ID)
 	for _, suffix := range []string{"default-in", "default-out"} {
@@ -584,6 +591,9 @@ func CleanFirewallRules(id int) {
 				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-%s-%s", tag, suffix, proto),
 			).CombinedOutput()
 		}
+		exec.Command("ip6tables", "-D", "FORWARD",
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-%s", tag, suffix),
+		).CombinedOutput()
 	}
 }
 
@@ -606,27 +616,125 @@ func ApplyFirewallRules(id int) error {
 	if c.IsKVM() {
 		bridge = "virbr0"
 	}
-	containerIP := c.IP
-	if containerIP == "" {
+	containerIP := strings.TrimSpace(c.IP)
+	containerIPv6s := firewallIPv6Addresses(c)
+	if containerIP == "" && len(containerIPv6s) == 0 {
 		return nil
 	}
 	tag := clicdTag(id)
 
-	// Apply default DROP policy first (inserted at position 1).
-	// Then insert ACCEPT rules (also at position 1), which pushes the DROPs down.
-	// Final order: ACCEPT rules on top, DROP defaults below, bridge ACCEPT rules at the bottom.
-	applyDefaultFirewallPolicy(tag, bridge, containerIP)
+	defaultAction := normalizeFirewallDefaultAction(c.FirewallDefaultAction)
+	if defaultAction == "DROP" {
+		if containerIP != "" {
+			if err := applyDefaultFirewallPolicy(tag, bridge, containerIP); err != nil {
+				return err
+			}
+		}
+		if err := applyDefaultFirewallIPv6Policy(tag, bridge, containerIPv6s); err != nil {
+			return err
+		}
+	}
 
-	for _, rule := range c.FirewallRules {
+	for i := len(c.FirewallRules) - 1; i >= 0; i-- {
+		rule := c.FirewallRules[i]
 		if !rule.Enabled {
 			continue
 		}
-		if err := applyOneFirewallRule(tag, bridge, containerIP, rule); err != nil {
-			fmt.Printf("Warning: failed to apply firewall rule %s for container %d: %v\n", rule.ID, id, err)
+		if containerIP != "" && firewallRuleAppliesToFamily(rule, true) {
+			if err := applyOneFirewallRule(tag, bridge, containerIP, rule); err != nil {
+				return fmt.Errorf("failed to apply firewall rule %s for container %d: %w", rule.ID, id, err)
+			}
+		}
+		if len(containerIPv6s) > 0 && firewallRuleAppliesToFamily(rule, false) {
+			if err := applyOneFirewallIPv6Rule(tag, bridge, containerIPv6s, rule); err != nil {
+				return fmt.Errorf("failed to apply IPv6 firewall rule %s for container %d: %w", rule.ID, id, err)
+			}
 		}
 	}
 
 	return nil
+}
+
+func normalizeFirewallDefaultAction(action string) string {
+	action = strings.ToUpper(strings.TrimSpace(action))
+	if action == "ACCEPT" {
+		return "ACCEPT"
+	}
+	return "DROP"
+}
+
+func normalizeFirewallNetwork(network string) string {
+	network = strings.ToLower(strings.TrimSpace(network))
+	switch network {
+	case "", "ipv4", "nat4":
+		return "ipv4"
+	case "ipv6":
+		return "ipv6"
+	case "all", "both":
+		return "all"
+	default:
+		return "ipv4"
+	}
+}
+
+func firewallRuleAppliesToFamily(rule config.FirewallRule, ipv4 bool) bool {
+	network := normalizeFirewallNetwork(rule.Network)
+	if network == "ipv4" {
+		return ipv4
+	}
+	if network == "ipv6" {
+		return !ipv4
+	}
+	if rule.SourceIP == "" {
+		return true
+	}
+	addr := firewallIPSpecAddr(rule.SourceIP)
+	if !addr.IsValid() {
+		return true
+	}
+	if ipv4 {
+		return addr.Is4()
+	}
+	return addr.Is6() && !addr.Is4In6()
+}
+
+func firewallIPSpecAddr(value string) netip.Addr {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return netip.Addr{}
+	}
+	if strings.Contains(value, "/") {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return netip.Addr{}
+		}
+		return prefix.Addr()
+	}
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return addr
+}
+
+func firewallIPv6Addresses(c *config.Container) []string {
+	if c == nil {
+		return nil
+	}
+	c.NormalizeNetworkAssignments()
+	seen := map[string]bool{}
+	result := []string{}
+	for _, assignment := range c.IPv6Addresses {
+		ip := strings.TrimSpace(assignment.Address)
+		if ip == "" || seen[ip] {
+			continue
+		}
+		if addr, err := netip.ParseAddr(ip); err == nil && addr.Is6() && !addr.Is4In6() {
+			seen[ip] = true
+			result = append(result, ip)
+		}
+	}
+	return result
 }
 
 func applyOneFirewallRule(tag, bridge, containerIP string, rule config.FirewallRule) error {
@@ -635,13 +743,13 @@ func applyOneFirewallRule(tag, bridge, containerIP string, rule config.FirewallR
 	// Build base iptables args
 	args := []string{"-I", "FORWARD", "1"}
 
-	// Direction: in = traffic arriving at container (-i bridge -d containerIP)
-	//            out = traffic leaving container (-o bridge -s containerIP)
+	// Direction: in = traffic arriving at container (-o bridge -d containerIP)
+	//            out = traffic leaving container (-i bridge -s containerIP)
 	switch rule.Direction {
 	case "in":
-		args = append(args, "-i", bridge, "-d", containerIP+"/32")
+		args = append(args, "-o", bridge, "-d", containerIP+"/32")
 	case "out":
-		args = append(args, "-o", bridge, "-s", containerIP+"/32")
+		args = append(args, "-i", bridge, "-s", containerIP+"/32")
 	default:
 		return fmt.Errorf("invalid direction: %s", rule.Direction)
 	}
@@ -662,7 +770,7 @@ func applyOneFirewallRule(tag, bridge, containerIP string, rule config.FirewallR
 	if rule.Port != "" && (rule.Protocol == "tcp" || rule.Protocol == "udp") {
 		// For "in" direction, traffic going TO the container uses --dport
 		// For "out" direction, traffic going FROM the container uses --dport (destination port on remote)
-		args = append(args, "--dport", normalizePortSpec(rule.Port))
+		args = append(args, firewallPortArgs(rule.Port)...)
 	}
 
 	// Source IP filter (for "out" direction, this matches the remote source; for "in", it matches the sender)
@@ -693,51 +801,145 @@ func applyOneFirewallRule(tag, bridge, containerIP string, rule config.FirewallR
 	return nil
 }
 
+func applyOneFirewallIPv6Rule(tag, bridge string, containerIPs []string, rule config.FirewallRule) error {
+	for _, containerIP := range containerIPs {
+		commentTag := fmt.Sprintf("clicd-%s-fw-%s-v6-%s", tag, rule.ID, firewallCommentIPTag(containerIP))
+		args := []string{"-I", "FORWARD", "1"}
+
+		switch rule.Direction {
+		case "in":
+			args = append(args, "-o", bridge, "-d", containerIP+"/128")
+		case "out":
+			args = append(args, "-i", bridge, "-s", containerIP+"/128")
+		default:
+			return fmt.Errorf("invalid direction: %s", rule.Direction)
+		}
+
+		switch rule.Protocol {
+		case "tcp", "udp":
+			args = append(args, "-p", rule.Protocol)
+		case "icmp":
+			args = append(args, "-p", "ipv6-icmp")
+		case "all":
+		default:
+			return fmt.Errorf("invalid protocol: %s", rule.Protocol)
+		}
+
+		if rule.Port != "" && (rule.Protocol == "tcp" || rule.Protocol == "udp") {
+			args = append(args, firewallPortArgs(rule.Port)...)
+		}
+
+		if rule.SourceIP != "" {
+			switch rule.Direction {
+			case "in":
+				args = append(args, "-s", rule.SourceIP)
+			case "out":
+				args = append(args, "-d", rule.SourceIP)
+			}
+		}
+
+		action := "DROP"
+		if rule.Action == "ACCEPT" {
+			action = "ACCEPT"
+		}
+		args = append(args, "-j", action)
+		args = append(args, "-m", "comment", "--comment", commentTag)
+
+		cmd := exec.Command("ip6tables", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("ip6tables error: %s", string(output))
+		}
+	}
+	return nil
+}
+
+func firewallPortArgs(port string) []string {
+	spec := normalizePortSpec(port)
+	if strings.Contains(spec, ",") {
+		return []string{"-m", "multiport", "--dports", spec}
+	}
+	return []string{"--dport", spec}
+}
+
 // normalizePortSpec converts user port input to iptables-compatible port spec.
-// "80,443" -> "80,443", "8000-9000" -> "8000:9000", "22" -> "22"
+// "80,443" -> "80,443", "8000-9000" -> "8000:9000", "80,443,8000-9000" -> "80,443,8000:9000"
 func normalizePortSpec(port string) string {
 	port = strings.TrimSpace(port)
 	if port == "" {
 		return ""
 	}
-	// Convert comma-separated to iptables format (already valid)
-	// Convert dash range to colon range: "8000-9000" -> "8000:9000"
-	if strings.Contains(port, "-") && !strings.Contains(port, ":") {
-		parts := strings.SplitN(port, "-", 2)
-		if len(parts) == 2 {
-			return strings.TrimSpace(parts[0]) + ":" + strings.TrimSpace(parts[1])
+	parts := strings.Split(port, ",")
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.Contains(part, "-") && !strings.Contains(part, ":") {
+			bounds := strings.SplitN(part, "-", 2)
+			if len(bounds) == 2 {
+				part = strings.TrimSpace(bounds[0]) + ":" + strings.TrimSpace(bounds[1])
+			}
 		}
+		parts[i] = part
 	}
-	return port
+	return strings.Join(parts, ",")
 }
 
-func applyDefaultFirewallPolicy(tag, bridge, containerIP string) {
-	// Default DROP: inserted at position 1 so they sit above bridge ACCEPT rules.
-	// The user-defined ACCEPT rules (also at position 1) were inserted first,
-	// so they end up above these DROP defaults after the position-1 insertions.
-	for _, proto := range []string{"tcp", "udp"} {
-		args := []string{
-			"-I", "FORWARD", "1",
-			"-i", bridge,
-			"-d", containerIP + "/32",
-			"-p", proto,
-			"-j", "DROP",
-			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-in-%s", tag, proto),
-		}
-		cmd := exec.Command("iptables", args...)
-		cmd.CombinedOutput()
-	}
-
-	for _, proto := range []string{"tcp", "udp"} {
-		args := []string{
+func applyDefaultFirewallPolicy(tag, bridge, containerIP string) error {
+	defaults := [][]string{
+		{
 			"-I", "FORWARD", "1",
 			"-o", bridge,
-			"-s", containerIP + "/32",
-			"-p", proto,
+			"-d", containerIP + "/32",
 			"-j", "DROP",
-			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-out-%s", tag, proto),
-		}
-		cmd := exec.Command("iptables", args...)
-		cmd.CombinedOutput()
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-in", tag),
+		},
+		{
+			"-I", "FORWARD", "1",
+			"-i", bridge,
+			"-s", containerIP + "/32",
+			"-j", "DROP",
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-out", tag),
+		},
 	}
+	for _, args := range defaults {
+		cmd := exec.Command("iptables", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("iptables default firewall error: %s", string(output))
+		}
+	}
+	return nil
+}
+
+func applyDefaultFirewallIPv6Policy(tag, bridge string, containerIPs []string) error {
+	for _, containerIP := range containerIPs {
+		defaults := [][]string{
+			{
+				"-I", "FORWARD", "1",
+				"-o", bridge,
+				"-d", containerIP + "/128",
+				"-j", "DROP",
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-in-v6-%s", tag, firewallCommentIPTag(containerIP)),
+			},
+			{
+				"-I", "FORWARD", "1",
+				"-i", bridge,
+				"-s", containerIP + "/128",
+				"-j", "DROP",
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-out-v6-%s", tag, firewallCommentIPTag(containerIP)),
+			},
+		}
+		for _, args := range defaults {
+			cmd := exec.Command("ip6tables", args...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("ip6tables default firewall error: %s", string(output))
+			}
+		}
+	}
+	return nil
+}
+
+func firewallCommentIPTag(ip string) string {
+	replacer := strings.NewReplacer(":", "_", ".", "_", "/", "_")
+	return replacer.Replace(ip)
 }

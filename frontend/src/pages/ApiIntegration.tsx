@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import api, { APIResponse, Container } from '../services/api'
+import { useLanguage } from '../contexts/LanguageContext'
 import { copyToClipboard } from '../utils/clipboard'
 
 interface ApiKeyItem {
@@ -238,6 +239,7 @@ const emptyForm = (): ApiKeyForm => ({
 })
 
 export default function ApiIntegration() {
+  const { t } = useLanguage()
   const [keys, setKeys] = useState<ApiKeyItem[]>([])
   const [containers, setContainers] = useState<Container[]>([])
   const [loading, setLoading] = useState(true)
@@ -329,7 +331,7 @@ export default function ApiIntegration() {
   }
 
   const deleteKey = async (id: string) => {
-    if (!window.confirm('确定删除这个 API Key 吗？')) return
+    if (!window.confirm(t('确定删除这个 API Key 吗？'))) return
     try {
       await api.delete(`/api-keys/${id}`)
       setKeys(prev => prev.filter(k => k.id !== id))
@@ -730,11 +732,15 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
     ram_mb: 512,
     disk_gb: 10,
     network_bw_mbps: 0,
+    network_down_mbps: 100,
+    network_up_mbps: 20,
     monthly_traffic_gb: 0,
     traffic_mode: 'total',
     traffic_in_gb: 0,
     traffic_out_gb: 0,
     io_speed_mbps: 0,
+    io_read_mbps: 80,
+    io_write_mbps: 30,
     extra_ports: [8080],
     port_mapping_count: 2,
     assign_nat: true,
@@ -765,8 +771,12 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
   'PUT /api/v1/containers/{id}/resource-limit': {
     vcpu: 1,
     ram_mb: 512,
-    io_speed_mbps: 0,
-    network_bw_mbps: 0,
+    network_down_mbps: 100,
+    network_up_mbps: 20,
+    io_read_mbps: 80,
+    io_write_mbps: 30,
+    network_bw_mbps: 20,
+    io_speed_mbps: 30,
   },
   'PUT /api/v1/containers/{id}/expiry': { expires_at: '2026-12-31 23:59:59' },
   'POST /api/v1/containers/{id}/reset-password': { password: 'NewPass123456' },
@@ -821,10 +831,11 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
   'POST /api/v1/security/check': { container_name: 'example-vm' },
   'PUT /api/v1/containers/{id}/firewall': {
     enabled: true,
+    default_action: 'DROP',
     rules: [
-      { id: '', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
-      { id: '', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
-      { id: '', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+      { id: '', network: 'ipv4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv4/NAT4', enabled: true },
+      { id: '', network: 'ipv6', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv6', enabled: true },
+      { id: '', network: 'all', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow outbound TCP', enabled: true },
     ],
   },
   'PUT /api/v1/security/settings': { auto_shutdown: false },
@@ -1039,10 +1050,11 @@ const responseSamples: Record<string, unknown> = {
     success: true,
     data: {
       enabled: true,
+      default_action: 'DROP',
       rules: [
-        { id: 'a1b2c3d4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
-        { id: 'e5f6g7h8', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
-        { id: 'i9j0k1l2', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+        { id: 'a1b2c3d4', network: 'ipv4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv4/NAT4', enabled: true },
+        { id: 'e5f6g7h8', network: 'ipv6', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv6', enabled: true },
+        { id: 'i9j0k1l2', network: 'all', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow outbound TCP', enabled: true },
       ],
     },
   },
@@ -1051,10 +1063,11 @@ const responseSamples: Record<string, unknown> = {
     message: 'Firewall updated',
     data: {
       enabled: true,
+      default_action: 'DROP',
       rules: [
-        { id: 'a1b2c3d4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
-        { id: 'e5f6g7h8', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
-        { id: 'i9j0k1l2', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+        { id: 'a1b2c3d4', network: 'ipv4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv4/NAT4', enabled: true },
+        { id: 'e5f6g7h8', network: 'ipv6', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv6', enabled: true },
+        { id: 'i9j0k1l2', network: 'all', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow outbound TCP', enabled: true },
       ],
     },
   },
@@ -1095,11 +1108,11 @@ const responseSamples: Record<string, unknown> = {
   'GET /api/v1/security/settings': { success: true, data: { auto_shutdown: false } },
   'PUT /api/v1/security/settings': { success: true, data: { auto_shutdown: false } },
   'GET /api/v1/swap': { success: true, data: { total_mb: 16383, used_mb: 0, free_mb: 16383, enabled: true, swap_file: '/swapfile' } },
-  'POST /api/v1/swap': { success: true, message: 'SWAP 已调整为 16384 MB', data: { total_mb: 16383, used_mb: 0, free_mb: 16383, enabled: true, swap_file: '/swapfile' } },
+  'POST /api/v1/swap': { success: true, message: 'SWAP adjusted to 16384 MB', data: { total_mb: 16383, used_mb: 0, free_mb: 16383, enabled: true, swap_file: '/swapfile' } },
   'POST /api/v1/batch-create': { success: true, data: ['task-12'] },
   'POST /api/v1/batch-action': { success: true, data: ['task-13'] },
-  'POST /api/v1/ssh-ticket': { success: true, data: { ticket: '***60秒有效票据***' } },
-  'POST /api/v1/vnc-ticket': { success: true, data: { ticket: '***60秒有效票据***' } },
+  'POST /api/v1/ssh-ticket': { success: true, data: { ticket: '***60-second valid ticket***' } },
+  'POST /api/v1/vnc-ticket': { success: true, data: { ticket: '***60-second valid ticket***' } },
   'POST /api/v1/sub-user/create': {
     success: true,
     message: 'Sub-user created',
@@ -1164,29 +1177,33 @@ function examplePathFor(path: string) {
 function endpointNoteFor(key: string) {
   const notes: string[] = []
   if (key === 'POST /api/v1/containers') {
-    notes.push('Linux 创建支持 ssh_auth_mode=auto_password|password|key；公网 IPv4、IPv6 与 NAT 可通过 assign_nat、assign_ipv4、assign_ipv6 组合使用。')
+    notes.push('Linux container creation supports ssh_auth_mode=auto_password|password|key. Public IPv4, IPv6, and NAT can be configured with assign_nat, assign_ipv4, and assign_ipv6.')
+    notes.push('Supports independent upload/download bandwidth limits and read/write I/O limits. network_bw_mbps and io_speed_mbps are deprecated symmetric compatibility aliases. New integrations should use network_down_mbps, network_up_mbps, io_read_mbps, and io_write_mbps.')
   }
   if (key === 'POST /api/v1/containers/{id}/reinstall') {
-    notes.push('重装支持 ssh_auth_mode=keep|auto_password|password|key；keep 仅用于重装，未传 SSH 字段时保持原有行为。')
+    notes.push('Reinstall supports ssh_auth_mode=keep|auto_password|password|key. keep is only for reinstall requests; if SSH fields are omitted, the existing behavior is kept.')
   }
   if (key === 'POST /api/v1/batch-create') {
-    notes.push('批量创建的单个 containers[] 项支持与 POST /api/v1/containers 相同的网络和 SSH 认证字段。')
+    notes.push('Each containers[] item in batch creation supports the same network and SSH authentication fields as POST /api/v1/containers.')
+  }
+  if (key === 'PUT /api/v1/containers/{id}/resource-limit') {
+    notes.push('Supports independent download/upload bandwidth limits and read/write I/O limits. Omitted fields keep their current values, and explicitly passing 0 makes that direction unlimited. network_bw_mbps and io_speed_mbps are deprecated symmetric compatibility aliases.')
   }
   if (key === 'PUT /api/v1/containers/{id}/firewall') {
-    notes.push('启用防火墙后默认拒绝所有 TCP/UDP 入站和出站流量，仅放行 rules 中定义的规则。direction: in=入站, out=出站。action: ACCEPT=放行, DROP=拒绝。port 支持单端口(22)、多端口(80,443)、范围(8000-9000)。')
+    notes.push('Backward compatible: default_action is optional; if omitted, the existing policy is kept. rule.network is optional; if omitted, it is treated as ipv4. default_action: DROP=deny unmatched traffic, ACCEPT=allow unmatched traffic. network: ipv4=IPv4 NAT/public IPv4, ipv6=IPv6, all=apply to both IPv4 and IPv6. For NAT inbound rules, port is the container internal port, not the host public port.')
   }
   if (key === 'POST /api/v1/batch-action') {
-    notes.push('action=reinstall 时可追加 template_id、ssh_auth_mode、ssh_password、ssh_public_key；其他 action 会忽略这些重装字段。')
+    notes.push('When action=reinstall, you can include template_id, ssh_auth_mode, ssh_password, and ssh_public_key. Other actions ignore these reinstall fields.')
   }
   if (key === 'PUT /api/v1/routing') {
-    notes.push('更新公网地址池需要 routing:write；已分配给容器的地址不能从池中移除。')
+    notes.push('Updating public address pools requires routing:write. Addresses already assigned to containers cannot be removed from the pool.')
   }
   if (key === 'POST /api/v1/routing/ipv4-scan') {
-    notes.push('扫描公网 IPv4 段需要 routing:write；verify=true 时会尝试校验地址可用性。')
+    notes.push('Scanning public IPv4 prefixes requires routing:write. When verify=true, the API also attempts to check address availability.')
   }
-  if (key.includes('/vnc-ticket')) notes.push('WebVNC 仅适用于 KVM 虚拟机；LXC 容器会返回 VNC console is only available for KVM VMs。')
-  if (key.includes('/containers/{id}/delete') || key.includes('/batch-action')) notes.push('该接口会进入任务队列，请随后调用 GET /api/v1/tasks 查看执行状态。')
-  if (key.includes('/reset-password') || key.includes('/api-keys') || key.includes('/sub-user')) notes.push('样例中的密钥、密码和票据已脱敏；创建类接口的完整密钥只在创建响应中出现一次。')
+  if (key.includes('/vnc-ticket')) notes.push('WebVNC only applies to KVM VMs; LXC containers return "VNC console is only available for KVM VMs".')
+  if (key.includes('/containers/{id}/delete') || key.includes('/batch-action')) notes.push('This API enters the task queue. Call GET /api/v1/tasks afterward to check execution status.')
+  if (key.includes('/reset-password') || key.includes('/api-keys') || key.includes('/sub-user')) notes.push('Keys, passwords, and tickets in examples are masked. Full secrets from create APIs appear only once in the creation response.')
   return notes.join(' ')
 }
 

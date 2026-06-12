@@ -53,7 +53,11 @@ curl -H "Authorization: Bearer YOUR_API_KEY" https://panel.example.com/api/v1/da
   "ssh_auth_mode": "auto_password",
   "ssh_password": "",
   "ssh_public_key": "",
-  "expires_at": ""
+  "expires_at": "",
+  "network_down_mbps": 100,
+  "network_up_mbps": 50,
+  "io_read_mbps": 120,
+  "io_write_mbps": 80
 }
 ```
 
@@ -71,6 +75,12 @@ curl -H "Authorization: Bearer YOUR_API_KEY" https://panel.example.com/api/v1/da
 | `ssh_auth_mode` | Linux 创建支持 `auto_password`、`password`、`key`；重装额外支持 `keep`。 |
 | `ssh_password` | `password` 模式下的自定义密码；8-64 位，至少包含字母和数字，不能包含空白字符。 |
 | `ssh_public_key` | `key` 模式下的一行 SSH 公钥。 |
+| `network_down_mbps` | 可选；容器下行/下载带宽限制，单位 Mbps，`0` 表示不限制。 |
+| `network_up_mbps` | 可选；容器上行/上传带宽限制，单位 Mbps，`0` 表示不限制。 |
+| `io_read_mbps` | 可选；磁盘读取限速，单位 MB/s，`0` 表示不限制。 |
+| `io_write_mbps` | 可选；磁盘写入限速，单位 MB/s，`0` 表示不限制。 |
+| `network_bw_mbps` | 兼容旧字段；同时设置上下行对称带宽，新接入推荐使用拆分字段。 |
+| `io_speed_mbps` | 兼容旧字段；同时设置读写对称 IO 限速，新接入推荐使用拆分字段。 |
 
 重装示例：
 
@@ -84,6 +94,102 @@ curl -H "Authorization: Bearer YOUR_API_KEY" https://panel.example.com/api/v1/da
 ```
 
 `keep` 仅用于重装，表示沿用当前 SSH 密码。Windows KVM 镜像会忽略 Linux SSH 公钥相关字段。
+
+## 资源限制与流量限制
+
+`PUT /api/v1/containers/{id}/resource-limit` 支持按字段局部更新；未传的字段保持不变。
+
+```json
+{
+  "vcpu": 2,
+  "ram_mb": 1024,
+  "network_down_mbps": 100,
+  "network_up_mbps": 50,
+  "io_read_mbps": 120,
+  "io_write_mbps": 80
+}
+```
+
+旧版 `network_bw_mbps` 和 `io_speed_mbps` 仍可用，分别表示上下行对称带宽和读写对称 IO 限速。新接入建议使用拆分字段，以便分别控制下载/上传和读取/写入。
+
+`PUT /api/v1/containers/{id}/traffic-limit` 请求体：
+
+```json
+{
+  "traffic_mode": "total",
+  "monthly_traffic_gb": 1024,
+  "traffic_in_gb": 0,
+  "traffic_out_gb": 0
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `traffic_mode` | 流量限制模式；常用 `total` 表示总量限制，`split` 表示入站/出站分别限制。 |
+| `monthly_traffic_gb` | `total` 模式下的月总流量额度，单位 GB；`0` 表示不限制。 |
+| `traffic_in_gb` | `split` 模式下的月入站额度，单位 GB；`0` 表示不限制。 |
+| `traffic_out_gb` | `split` 模式下的月出站额度，单位 GB；`0` 表示不限制。 |
+
+## 容器防火墙
+
+容器防火墙通过 `GET /api/v1/containers/{id}/firewall` 读取，通过 `PUT /api/v1/containers/{id}/firewall` 更新。容器运行中更新时会立即应用规则。
+
+更新示例：
+
+```json
+{
+  "enabled": true,
+  "default_action": "DROP",
+  "rules": [
+    {
+      "direction": "in",
+      "protocol": "tcp",
+      "action": "ACCEPT",
+      "network": "ipv4",
+      "source_ip": "203.0.113.0/24",
+      "port": "22,80,443",
+      "description": "allow admin and web"
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `enabled` | 是否启用容器防火墙。 |
+| `default_action` | 默认动作：`ACCEPT` 或 `DROP`。 |
+| `rules[].id` | 可选；新规则可省略，后端会自动生成。 |
+| `rules[].direction` | 方向：`in` 或 `out`。 |
+| `rules[].protocol` | 协议：`tcp`、`udp`、`icmp` 或 `all`。 |
+| `rules[].action` | 动作：`ACCEPT` 或 `DROP`。 |
+| `rules[].network` | 网络类型：`ipv4`、`ipv6` 或 `all`。 |
+| `rules[].source_ip` | 可选；源 IP、CIDR 或地址范围。 |
+| `rules[].port` | 可选；仅 `tcp`/`udp` 支持，可写 `22`、`80,443` 或 `8000-9000`。 |
+| `rules[].description` | 可选备注。 |
+
+## API Key 创建与更新
+
+`POST /api/v1/api-keys` 和 `PATCH /api/v1/api-keys/{id}` 使用相同的字段结构。创建时 `name` 必填；更新时根据需要覆盖字段。
+
+```json
+{
+  "name": "Automation",
+  "ip_whitelist": "198.51.100.23,203.0.113.0/24",
+  "scopes": ["dashboard:read", "container:read", "container:power"],
+  "expires_at": "2026-12-31 23:59:59",
+  "disabled": false,
+  "container_uuids": ["00000000-0000-4000-8000-000000000005"]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` | API Key 名称；创建时必填。 |
+| `ip_whitelist` | 可选；允许的来源 IP/CIDR，多个值用逗号分隔；空值表示不限制。 |
+| `scopes` | 可选；权限范围。省略时使用默认只读范围，传 `*` 表示全部权限。 |
+| `expires_at` | 可选；过期时间，空值表示不过期。 |
+| `disabled` | 是否禁用该 Key。 |
+| `container_uuids` | 可选；限制该 Key 只能访问指定容器。 |
 
 ## Python 示例
 
@@ -140,6 +246,7 @@ print(resp.json())
 | --- | --- | --- |
 | GET | `/api/v1/dashboard` | 控制面板统计 |
 | GET | `/api/v1/host-info` | 主机资源 |
+| GET | `/api/v1/host-report` | 主机巡检报告 |
 | GET | `/api/v1/routing` | NAT/IPv4/IPv6 路由 |
 | PUT | `/api/v1/routing` | 更新公网 IPv4/IPv6 池 |
 | POST | `/api/v1/routing/ipv4-scan` | 扫描公网 IPv4 段 |
@@ -151,10 +258,11 @@ print(resp.json())
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/v1/containers` | 容器列表 |
+| GET | `/api/v1/containers` | 容器列表（推荐） |
+| GET | `/api/v1/containers/list` | 容器列表兼容 GET 写法 |
 | POST | `/api/v1/containers/list` | 容器列表兼容 POST 写法 |
 | POST | `/api/v1/containers` | 创建容器 |
-| GET | `/api/v1/containers/{id|uuid|name}` | 容器详情 |
+| GET | `/api/v1/containers/{id\|uuid\|name}` | 容器详情 |
 | POST | `/api/v1/containers/{id}/start` | 开机 |
 | POST | `/api/v1/containers/{id}/stop` | 关机 |
 | POST | `/api/v1/containers/{id}/restart` | 重启 |
@@ -173,10 +281,12 @@ print(resp.json())
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/v1/containers/{id}/random-port` | 随机可用端口 |
+| GET | `/api/v1/containers/{id}/random-port` | 随机可用端口；可传 `host_ip` 查询指定宿主机 IP |
 | POST | `/api/v1/containers/{id}/port-mappings` | 添加端口映射 |
 | PUT | `/api/v1/containers/{id}/port-mappings/{index}` | 更新端口映射 |
 | DELETE | `/api/v1/containers/{id}/port-mappings/{index}` | 删除端口映射 |
+| GET | `/api/v1/containers/{id}/firewall` | 获取容器防火墙设置 |
+| PUT | `/api/v1/containers/{id}/firewall` | 更新容器防火墙设置 |
 | GET | `/api/v1/snapshots` | 快照总览 |
 | GET | `/api/v1/containers/{id}/snapshots` | 容器快照 |
 | POST | `/api/v1/containers/{id}/snapshots` | 创建快照 |
@@ -191,6 +301,7 @@ print(resp.json())
 | --- | --- | --- |
 | GET | `/api/v1/templates` | 模板列表 |
 | GET | `/api/v1/images` | 镜像管理列表 |
+| GET | `/api/v1/images/enabled` | 已启用且已下载的镜像；支持 `type=lxc\|kvm` |
 | POST | `/api/v1/images/download` | 下载镜像 |
 | POST | `/api/v1/images/cancel` | 取消镜像下载 |
 | DELETE | `/api/v1/images/delete` | 删除镜像缓存 |
@@ -203,6 +314,12 @@ print(resp.json())
 | PUT | `/api/v1/security/settings` | 更新安全设置 |
 | GET | `/api/v1/swap` | Swap 信息 |
 | POST | `/api/v1/swap` | 调整 Swap |
+| GET | `/api/v1/language` | 当前面板语言 |
+| POST/PUT | `/api/v1/language` | 更新面板语言 |
+| GET | `/api/v1/ssl` | SSL 设置（需管理员权限 / `admin:access`） |
+| PUT | `/api/v1/ssl` | 更新 SSL 设置（需管理员权限 / `admin:access`） |
+| GET | `/api/v1/webssh-origins` | WebSSH Origin 白名单（需管理员权限 / `admin:access`） |
+| PUT | `/api/v1/webssh-origins` | 更新 WebSSH Origin 白名单（需管理员权限 / `admin:access`） |
 | POST | `/api/v1/batch-create` | 批量创建容器 |
 | POST | `/api/v1/batch-action` | 批量开关机/删除/重装 |
 | POST | `/api/v1/ssh-ticket` | 创建 WebSSH 票据 |
@@ -253,6 +370,16 @@ print(resp.json())
         "public_ipv6_interface": "eth0"
       },
       "load": { "load1": 0.01, "load5": 0.03, "load15": 0.01 }
+    }
+  },
+  "GET /api/v1/host-report": {
+    "success": true,
+    "data": {
+      "generated_at": "2026-06-12 10:00:00",
+      "summary": { "status": "ok", "warnings": 0 },
+      "host": { "hostname": "node-1", "kernel": "6.8.0" },
+      "resources": { "cpu_cores": 8, "ram_total_mb": 31825, "disk_total_gb": 1750.49 },
+      "network": { "public_ipv4": "203.0.113.10", "public_ipv6": "2001:db8:100::2" }
     }
   },
   "GET /api/v1/routing": {
@@ -331,6 +458,10 @@ print(resp.json())
         "vcpu": 1,
         "ram_mb": 512,
         "disk_gb": 10,
+        "network_down_mbps": 100,
+        "network_up_mbps": 50,
+        "io_read_mbps": 120,
+        "io_write_mbps": 80,
         "status": "running",
         "ip": "10.0.0.10",
         "ipv6": "2001:db8:100::1005",
@@ -341,6 +472,12 @@ print(resp.json())
           { "container_port": 20000, "host_port": 20000, "protocol": "tcp", "description": "Port-20000" }
         ]
       }
+    ]
+  },
+  "GET /api/v1/containers/list": {
+    "success": true,
+    "data": [
+      { "id": 5, "uuid": "00000000-0000-4000-8000-000000000005", "name": "example-vm", "status": "running", "ip": "10.0.0.10" }
     ]
   },
   "POST /api/v1/containers/list": {
@@ -410,7 +547,7 @@ print(resp.json())
     "success": true,
     "data": {
       "mode": "total",
-      "limit_gb": 0,
+      "limit_gb": 1024,
       "in_limit_gb": 0,
       "out_limit_gb": 0,
       "total_used_bytes": 142082,
@@ -453,7 +590,7 @@ print(resp.json())
 
 ```json
 {
-  "GET /api/v1/containers/{id}/random-port": {
+  "GET /api/v1/containers/{id}/random-port?host_ip=203.0.113.10": {
     "success": true,
     "data": { "port": 61320 }
   },
@@ -473,6 +610,21 @@ print(resp.json())
   "DELETE /api/v1/containers/{id}/port-mappings/{index}": {
     "success": true,
     "data": []
+  },
+  "GET /api/v1/containers/{id}/firewall": {
+    "success": true,
+    "data": {
+      "enabled": true,
+      "default_action": "DROP",
+      "rules": [
+        { "id": "a1b2c3d4", "direction": "in", "protocol": "tcp", "action": "ACCEPT", "network": "ipv4", "source_ip": "203.0.113.0/24", "port": "22,80,443", "description": "allow admin and web" }
+      ]
+    }
+  },
+  "PUT /api/v1/containers/{id}/firewall": {
+    "success": true,
+    "message": "Firewall updated",
+    "data": { "enabled": true, "default_action": "DROP", "rules": [] }
   },
   "GET /api/v1/snapshots": {
     "success": true,
@@ -539,6 +691,12 @@ print(resp.json())
       { "id": "ubuntu-noble", "name": "Ubuntu 24.04", "type": "lxc", "downloaded": true, "enabled": true, "downloading": false, "progress": 0, "size_bytes": 135005452 }
     ]
   },
+  "GET /api/v1/images/enabled?type=lxc": {
+    "success": true,
+    "data": [
+      { "id": "ubuntu-noble", "name": "Ubuntu 24.04", "distro": "ubuntu", "release": "noble", "arch": "amd64", "variant": "default", "description": "Ubuntu 24.04 LTS", "type": "lxc" }
+    ]
+  },
   "POST /api/v1/images/download": {
     "success": true,
     "message": "Already downloaded"
@@ -587,6 +745,32 @@ print(resp.json())
     "success": true,
     "message": "SWAP 已调整为 16384 MB",
     "data": { "total_mb": 16383, "used_mb": 0, "free_mb": 16383, "enabled": true, "swap_file": "/swapfile" }
+  },
+  "GET /api/v1/language": {
+    "success": true,
+    "data": { "language": "zh" }
+  },
+  "PUT /api/v1/language": {
+    "success": true,
+    "data": { "language": "en" }
+  },
+  "GET /api/v1/ssl": {
+    "success": true,
+    "data": { "enabled": true, "mode": "self-signed", "target": "panel.example.com", "detected_host": "panel.example.com", "needs_restart": false }
+  },
+  "PUT /api/v1/ssl": {
+    "success": true,
+    "message": "SSL settings saved",
+    "data": { "enabled": true, "mode": "self-signed", "target": "panel.example.com", "needs_restart": true }
+  },
+  "GET /api/v1/webssh-origins": {
+    "success": true,
+    "data": { "origins": ["https://panel.example.com"], "current_origin": "https://panel.example.com" }
+  },
+  "PUT /api/v1/webssh-origins": {
+    "success": true,
+    "message": "Origin allowlist saved",
+    "data": { "origins": ["https://panel.example.com"], "current_origin": "https://panel.example.com" }
   },
   "POST /api/v1/batch-create": {
     "success": true,
@@ -654,17 +838,17 @@ print(resp.json())
   "GET /api/v1/api-keys": {
     "success": true,
     "data": [
-      { "id": "c271023f", "name": "Test", "prefix": "clicd_sk_dd9d...", "ip_whitelist": "", "created_at": "2026-06-08 15:44:40", "last_used": "2026-06-08 15:46:10", "scopes": ["*"], "last_used_ip": "198.51.100.23" }
+      { "id": "c271023f", "name": "Test", "prefix": "clicd_sk_dd9d...", "ip_whitelist": "", "created_at": "2026-06-08 15:44:40", "last_used": "2026-06-08 15:46:10", "scopes": ["*"], "expires_at": "", "disabled": false, "container_uuids": [], "last_used_ip": "198.51.100.23" }
     ]
   },
   "POST /api/v1/api-keys": {
     "success": true,
     "message": "API key created. Save this key now - it won't be shown again.",
-    "data": { "id": "a1b2c3d4", "name": "Automation", "key": "clicd_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "prefix": "clicd_sk_xxxx...", "scopes": ["dashboard:read", "container:read"] }
+    "data": { "id": "a1b2c3d4", "name": "Automation", "key": "clicd_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "prefix": "clicd_sk_xxxx...", "ip_whitelist": "198.51.100.23", "scopes": ["dashboard:read", "container:read"], "expires_at": "2026-12-31 23:59:59", "disabled": false, "container_uuids": ["00000000-0000-4000-8000-000000000005"] }
   },
   "PATCH /api/v1/api-keys/{id}": {
     "success": true,
-    "data": { "id": "a1b2c3d4", "name": "Automation", "prefix": "clicd_sk_xxxx...", "scopes": ["dashboard:read", "container:read"], "disabled": false }
+    "data": { "id": "a1b2c3d4", "name": "Automation", "prefix": "clicd_sk_xxxx...", "scopes": ["dashboard:read", "container:read"], "expires_at": "2026-12-31 23:59:59", "disabled": false, "container_uuids": ["00000000-0000-4000-8000-000000000005"] }
   },
   "DELETE /api/v1/api-keys/{id}": {
     "success": true,

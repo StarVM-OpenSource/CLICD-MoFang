@@ -21,11 +21,15 @@ const defaultForm: CreateContainerRequest = {
   ram_mb: 512,
   disk_gb: 10,
   network_bw_mbps: 0,
+  network_down_mbps: 0,
+  network_up_mbps: 0,
   monthly_traffic_gb: 0,
   traffic_mode: 'total',
   traffic_in_gb: 0,
   traffic_out_gb: 0,
   io_speed_mbps: 0,
+  io_read_mbps: 0,
+  io_write_mbps: 0,
   extra_ports: [],
   port_mapping_count: 2,
   assign_nat: true,
@@ -498,7 +502,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             </Field>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <Field label="磁盘 (GB)">
               <NumberInput
                 value={form.disk_gb}
@@ -509,12 +513,20 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               />
               {resourceErrors.disk_gb && <p className="mt-1 text-xs text-red-500">{resourceErrors.disk_gb}</p>}
             </Field>
-            <Field label="带宽 (Mbps)">
-              <NumberInput value={form.network_bw_mbps} min={0} onChange={(value) => setForm({ ...form, network_bw_mbps: value })} />
-            </Field>
-            <Field label="IO 速度 (MB/s)">
-              <NumberInput value={form.io_speed_mbps} min={0} onChange={(value) => setForm({ ...form, io_speed_mbps: value })} />
-            </Field>
+            <div className="grid grid-cols-2 gap-3 md:col-span-2">
+              <Field label="下行带宽 (Mbps)">
+                <NumberInput value={form.network_down_mbps} min={0} onChange={(value) => setForm({ ...form, network_down_mbps: value, network_bw_mbps: symmetricLimit(value, form.network_up_mbps) })} />
+              </Field>
+              <Field label="上行带宽 (Mbps)">
+                <NumberInput value={form.network_up_mbps} min={0} onChange={(value) => setForm({ ...form, network_up_mbps: value, network_bw_mbps: symmetricLimit(form.network_down_mbps, value) })} />
+              </Field>
+              <Field label="读取 IO (MB/s)">
+                <NumberInput value={form.io_read_mbps} min={0} onChange={(value) => setForm({ ...form, io_read_mbps: value, io_speed_mbps: symmetricLimit(value, form.io_write_mbps) })} />
+              </Field>
+              <Field label="写入 IO (MB/s)">
+                <NumberInput value={form.io_write_mbps} min={0} onChange={(value) => setForm({ ...form, io_write_mbps: value, io_speed_mbps: symmetricLimit(form.io_read_mbps, value) })} />
+              </Field>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -777,6 +789,15 @@ function formatNATPortCount(count: number, language: Language) {
   return language === 'en'
     ? `${count} NAT ports will be assigned`
     : `将分配 ${count} 个 NAT 端口`
+}
+
+function symmetricLimit(a: number, b: number) {
+  const left = Math.max(0, Number(a) || 0)
+  const right = Math.max(0, Number(b) || 0)
+  if (left === right) return left
+  if (left === 0) return right
+  if (right === 0) return left
+  return Math.min(left, right)
 }
 
 const inputClass =

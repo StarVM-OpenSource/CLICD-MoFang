@@ -388,6 +388,7 @@ func cliCreateContainer(reader *bufio.Reader) {
 		IOSpeedMBps:      promptInt(reader, "IO 速度 (MB/s)", 500),
 		ExtraPorts:       promptPortList(reader, "额外 NAT 端口，多个用逗号分隔"),
 	}
+	cfg.NormalizeResourceAliases()
 
 	cliPrintf("\n正在创建容器 %s ...\n", name)
 	if err := manager.CreateContainer(cfg); err != nil {

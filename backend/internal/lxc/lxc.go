@@ -226,11 +226,15 @@ type ContainerConfig struct {
 	RAMMB            int      `json:"ram_mb"`
 	DiskGB           int      `json:"disk_gb"`
 	NetworkBWMbps    int      `json:"network_bw_mbps"`
+	NetworkDownMbps  int      `json:"network_down_mbps"`
+	NetworkUpMbps    int      `json:"network_up_mbps"`
 	MonthlyTrafficGB int      `json:"monthly_traffic_gb"`
 	TrafficMode      string   `json:"traffic_mode"`   // "total" or "in_out"
 	TrafficInGB      int      `json:"traffic_in_gb"`  // 0=unlimited
 	TrafficOutGB     int      `json:"traffic_out_gb"` // 0=unlimited
 	IOSpeedMBps      int      `json:"io_speed_mbps"`
+	IOReadMBps       int      `json:"io_read_mbps"`
+	IOWriteMBps      int      `json:"io_write_mbps"`
 	ExtraPorts       []int    `json:"extra_ports"`
 	PortMappingCount int      `json:"port_mapping_count"`
 	AssignNAT        *bool    `json:"assign_nat,omitempty"`
@@ -247,12 +251,48 @@ type ContainerConfig struct {
 	ExpiresAt        string   `json:"expires_at"`
 }
 
+func (cfg *ContainerConfig) NormalizeResourceAliases() {
+	if cfg == nil {
+		return
+	}
+	if cfg.NetworkBWMbps < 0 {
+		cfg.NetworkBWMbps = 0
+	}
+	if cfg.NetworkDownMbps < 0 {
+		cfg.NetworkDownMbps = 0
+	}
+	if cfg.NetworkUpMbps < 0 {
+		cfg.NetworkUpMbps = 0
+	}
+	if cfg.NetworkDownMbps == 0 && cfg.NetworkUpMbps == 0 && cfg.NetworkBWMbps > 0 {
+		cfg.NetworkDownMbps = cfg.NetworkBWMbps
+		cfg.NetworkUpMbps = cfg.NetworkBWMbps
+	}
+	cfg.NetworkBWMbps = config.LegacySymmetricLimit(cfg.NetworkDownMbps, cfg.NetworkUpMbps)
+
+	if cfg.IOSpeedMBps < 0 {
+		cfg.IOSpeedMBps = 0
+	}
+	if cfg.IOReadMBps < 0 {
+		cfg.IOReadMBps = 0
+	}
+	if cfg.IOWriteMBps < 0 {
+		cfg.IOWriteMBps = 0
+	}
+	if cfg.IOReadMBps == 0 && cfg.IOWriteMBps == 0 && cfg.IOSpeedMBps > 0 {
+		cfg.IOReadMBps = cfg.IOSpeedMBps
+		cfg.IOWriteMBps = cfg.IOSpeedMBps
+	}
+	cfg.IOSpeedMBps = config.LegacySymmetricLimit(cfg.IOReadMBps, cfg.IOWriteMBps)
+}
+
 func (cfg ContainerConfig) WantsNAT() bool {
 	return cfg.AssignNAT == nil || *cfg.AssignNAT
 }
 
 // CreateContainer creates a new LXC container. Uses ct-{id} as LXC name internally.
 func (m *Manager) CreateContainer(cfg ContainerConfig) error {
+	cfg.NormalizeResourceAliases()
 	tmpl := FindTemplate(cfg.TemplateID)
 	if tmpl == nil {
 		return fmt.Errorf("template not found: %s", cfg.TemplateID)
@@ -389,12 +429,16 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		RAMMB:            cfg.RAMMB,
 		DiskGB:           cfg.DiskGB,
 		NetworkBWMbps:    cfg.NetworkBWMbps,
+		NetworkDownMbps:  cfg.NetworkDownMbps,
+		NetworkUpMbps:    cfg.NetworkUpMbps,
 		MonthlyTrafficGB: cfg.MonthlyTrafficGB,
 		TrafficMode:      trafficMode,
 		TrafficInGB:      cfg.TrafficInGB,
 		TrafficOutGB:     cfg.TrafficOutGB,
 		TrafficResetDate: trafficResetDate,
 		IOSpeedMBps:      cfg.IOSpeedMBps,
+		IOReadMBps:       cfg.IOReadMBps,
+		IOWriteMBps:      cfg.IOWriteMBps,
 		Status:           "stopped",
 		IP:               "",
 		PublicIPv4s:      publicIPv4s,
@@ -531,6 +575,7 @@ func (m *Manager) preconfigureSSH(rootfsPath, templateID string, sshAuthMode str
 
 // applyResourceLimits applies cgroup v2 limits and mandatory security hardening to container config.
 func (m *Manager) applyResourceLimits(lxcName string, cfg ContainerConfig) error {
+	cfg.NormalizeResourceAliases()
 	configFile := filepath.Join(m.LxcPath, lxcName, "config")
 
 	data, err := os.ReadFile(configFile)
@@ -599,12 +644,12 @@ func (m *Manager) applyResourceLimits(lxcName string, cfg ContainerConfig) error
 		ramBytes := int64(cfg.RAMMB) * 1024 * 1024
 		newLines = append(newLines, fmt.Sprintf("lxc.cgroup2.memory.max = %d", ramBytes))
 	}
-	if cfg.IOSpeedMBps > 0 {
+	if cfg.IOReadMBps > 0 || cfg.IOWriteMBps > 0 {
 		// Note: lxc.cgroup2.io.max is skipped for unprivileged containers because
 		// LXC's cgfsng_setup_limits cannot resolve host device numbers (e.g. 8:1)
 		// in the unprivileged namespace context.
 		// IO limits are instead applied post-start via direct cgroup2 writes.
-		fmt.Printf("Info: IO limit (%d MB/s) for %s will be applied post-start via cgroup2\n", cfg.IOSpeedMBps, lxcName)
+		fmt.Printf("Info: IO limit (read=%d MB/s write=%d MB/s) for %s will be applied post-start via cgroup2\n", cfg.IOReadMBps, cfg.IOWriteMBps, lxcName)
 	}
 
 	newContent := strings.Join(newLines, "\n")
@@ -614,18 +659,28 @@ func (m *Manager) applyResourceLimits(lxcName string, cfg ContainerConfig) error
 	return nil
 }
 
-func (m *Manager) ioLimitLines(lxcName string, mbps int) ([]string, error) {
-	if mbps <= 0 {
-		return nil, nil
+func (m *Manager) ioLimitLines(lxcName string, readMBps int, writeMBps int) ([]string, error) {
+	if readMBps < 0 {
+		readMBps = 0
+	}
+	if writeMBps < 0 {
+		writeMBps = 0
 	}
 	devices, err := m.rootfsBlockDevices(lxcName)
 	if err != nil {
 		return nil, err
 	}
-	ioBytes := mbps * 1024 * 1024
+	readValue := "max"
+	if readMBps > 0 {
+		readValue = strconv.Itoa(readMBps * 1024 * 1024)
+	}
+	writeValue := "max"
+	if writeMBps > 0 {
+		writeValue = strconv.Itoa(writeMBps * 1024 * 1024)
+	}
 	lines := make([]string, 0, len(devices))
 	for _, device := range devices {
-		lines = append(lines, fmt.Sprintf("%s rbps=%d wbps=%d", device, ioBytes, ioBytes))
+		lines = append(lines, fmt.Sprintf("%s rbps=%s wbps=%s", device, readValue, writeValue))
 	}
 	return lines, nil
 }
@@ -1253,8 +1308,12 @@ func (m *Manager) StartContainer(id int) error {
 			RAMMB:            c.RAMMB,
 			DiskGB:           c.DiskGB,
 			NetworkBWMbps:    c.NetworkBWMbps,
+			NetworkDownMbps:  c.NetworkDownMbps,
+			NetworkUpMbps:    c.NetworkUpMbps,
 			MonthlyTrafficGB: c.MonthlyTrafficGB,
 			IOSpeedMBps:      c.IOSpeedMBps,
+			IOReadMBps:       c.IOReadMBps,
+			IOWriteMBps:      c.IOWriteMBps,
 			AssignIPv6:       c.IPv6 != "" || len(c.IPv6Addresses) > 0,
 			ExpiresAt:        c.ExpiresAt,
 		}); err != nil {
@@ -1378,6 +1437,7 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 	if c == nil || c.Status != "running" {
 		return nil
 	}
+	config.NormalizeContainerResourceAliases(c)
 	lxcName := c.LxcName()
 
 	// CPU: write cpu.max
@@ -1400,48 +1460,52 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 		os.WriteFile(path, []byte(memLine), 0644)
 	}
 
-	// IO speed: write io.max
-	if c.IOSpeedMBps > 0 {
-		ioLines, err := m.ioLimitLines(lxcName, c.IOSpeedMBps)
-		if err != nil {
-			return err
-		}
-		ioLine := strings.Join(ioLines, "\n")
-		for _, path := range []string{
-			fmt.Sprintf("/sys/fs/cgroup/lxc/%s/io.max", lxcName),
-			fmt.Sprintf("/sys/fs/cgroup/lxc.payload.%s/io.max", lxcName),
-		} {
-			os.WriteFile(path, []byte(ioLine), 0644)
-		}
+	// IO speed: write io.max, including max values to clear old per-direction limits.
+	ioLines, err := m.ioLimitLines(lxcName, c.IOReadMBps, c.IOWriteMBps)
+	if err != nil {
+		return err
+	}
+	ioLine := strings.Join(ioLines, "\n")
+	for _, path := range []string{
+		fmt.Sprintf("/sys/fs/cgroup/lxc/%s/io.max", lxcName),
+		fmt.Sprintf("/sys/fs/cgroup/lxc.payload.%s/io.max", lxcName),
+	} {
+		os.WriteFile(path, []byte(ioLine), 0644)
 	}
 
 	// Network bandwidth
-	if c.NetworkBWMbps > 0 {
-		m.applyBandwidthLimit(lxcName, c.NetworkBWMbps)
-	} else {
-		m.cleanupBandwidthLimit(lxcName)
-	}
+	m.applyBandwidthLimit(lxcName, c.NetworkDownMbps, c.NetworkUpMbps)
 	return nil
 }
 
-func (m *Manager) applyBandwidthLimit(lxcName string, mbps int) {
+func (m *Manager) applyBandwidthLimit(lxcName string, downMbps int, upMbps int) {
 	veth := m.getContainerVethByNS(lxcName)
 	if veth == "" {
 		fmt.Printf("Warning: could not find veth for %s\n", lxcName)
 		return
 	}
-	rate := fmt.Sprintf("%dmbit", mbps)
-	burst := fmt.Sprintf("%dkbit", mbps*100)
 	exec.Command("tc", "qdisc", "del", "dev", veth, "root").Run()
-	exec.Command("tc", "qdisc", "add", "dev", veth, "root", "handle", "1:", "htb", "default", "10").Run()
-	exec.Command("tc", "class", "add", "dev", veth, "parent", "1:", "classid", "1:10", "htb", "rate", rate, "burst", burst).Run()
-	fmt.Printf("Bandwidth limit: %s = %d Mbps on %s\n", lxcName, mbps, veth)
+	exec.Command("tc", "qdisc", "del", "dev", veth, "ingress").Run()
+	if downMbps > 0 {
+		rate := fmt.Sprintf("%dmbit", downMbps)
+		burst := fmt.Sprintf("%dkbit", downMbps*100)
+		exec.Command("tc", "qdisc", "add", "dev", veth, "root", "handle", "1:", "htb", "default", "10").Run()
+		exec.Command("tc", "class", "add", "dev", veth, "parent", "1:", "classid", "1:10", "htb", "rate", rate, "burst", burst).Run()
+	}
+	if upMbps > 0 {
+		rate := fmt.Sprintf("%dmbit", upMbps)
+		burst := fmt.Sprintf("%dkbit", upMbps*100)
+		exec.Command("tc", "qdisc", "add", "dev", veth, "handle", "ffff:", "ingress").Run()
+		exec.Command("tc", "filter", "add", "dev", veth, "parent", "ffff:", "protocol", "all", "u32", "match", "u32", "0", "0", "police", "rate", rate, "burst", burst, "drop", "flowid", ":1").Run()
+	}
+	fmt.Printf("Bandwidth limit: %s down=%d Mbps up=%d Mbps on %s\n", lxcName, downMbps, upMbps, veth)
 }
 
 func (m *Manager) cleanupBandwidthLimit(lxcName string) {
 	veth := m.getContainerVethByNS(lxcName)
 	if veth != "" {
 		exec.Command("tc", "qdisc", "del", "dev", veth, "root").Run()
+		exec.Command("tc", "qdisc", "del", "dev", veth, "ingress").Run()
 	}
 }
 
@@ -2447,6 +2511,8 @@ func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 			RAMMB:            512,
 			DiskGB:           10,
 			NetworkBWMbps:    100,
+			NetworkDownMbps:  100,
+			NetworkUpMbps:    100,
 			MonthlyTrafficGB: 1000,
 			TrafficMode:      "total",
 			Status:           status,
@@ -2610,8 +2676,12 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...Co
 		RAMMB:            c.RAMMB,
 		DiskGB:           c.DiskGB,
 		NetworkBWMbps:    c.NetworkBWMbps,
+		NetworkDownMbps:  c.NetworkDownMbps,
+		NetworkUpMbps:    c.NetworkUpMbps,
 		MonthlyTrafficGB: c.MonthlyTrafficGB,
 		IOSpeedMBps:      c.IOSpeedMBps,
+		IOReadMBps:       c.IOReadMBps,
+		IOWriteMBps:      c.IOWriteMBps,
 		AssignIPv6:       c.IPv6 != "" || len(c.IPv6Addresses) > 0,
 		ExpiresAt:        c.ExpiresAt,
 	}
@@ -2694,9 +2764,8 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...Co
 		}
 	}
 	// Apply bandwidth limit after reinstall
-	if c.NetworkBWMbps > 0 {
-		m.applyBandwidthLimit(c.LxcName(), c.NetworkBWMbps)
-	}
+	config.NormalizeContainerResourceAliases(c)
+	m.applyBandwidthLimit(c.LxcName(), c.NetworkDownMbps, c.NetworkUpMbps)
 	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.ApplyIPv6(id); err != nil {
 			fmt.Printf("Warning: failed to apply IPv6 after reinstall: %v\n", err)

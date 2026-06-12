@@ -90,7 +90,7 @@ export default function ContainerCard({ container, onRefresh }: ContainerCardPro
         </div>
         <div className="flex items-center gap-2 text-sm text-gray-600">
           <Globe className="w-3.5 h-3.5" />
-          <span>{container.network_bw_mbps} Mbps</span>
+          <span>{formatNetworkLimit(container)}</span>
         </div>
       </div>
 
@@ -139,4 +139,11 @@ export default function ContainerCard({ container, onRefresh }: ContainerCardPro
       </div>
     </div>
   )
+}
+
+function formatNetworkLimit(container: { network_bw_mbps?: number; network_down_mbps?: number; network_up_mbps?: number }) {
+  const down = Math.max(0, Number(container.network_down_mbps || container.network_bw_mbps || 0))
+  const up = Math.max(0, Number(container.network_up_mbps || container.network_bw_mbps || 0))
+  if (down === 0 && up === 0) return '不限速'
+  return `下 ${down || '不限'} / 上 ${up || '不限'} Mbps`
 }

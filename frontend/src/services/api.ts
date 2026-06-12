@@ -47,6 +47,7 @@ export interface PortMapping {
 
 export interface FirewallRule {
   id: string
+  network?: 'ipv4' | 'ipv6' | 'all'
   direction: 'in' | 'out'
   protocol: 'tcp' | 'udp' | 'icmp' | 'all'
   port: string
@@ -79,6 +80,8 @@ export interface Container {
   ram_mb: number
   disk_gb: number
   network_bw_mbps: number
+  network_down_mbps: number
+  network_up_mbps: number
   monthly_traffic_gb: number
   traffic_mode: string
   traffic_in_gb: number
@@ -87,6 +90,8 @@ export interface Container {
   traffic_used_tx: number
   traffic_reset_date: string
   io_speed_mbps: number
+  io_read_mbps: number
+  io_write_mbps: number
   status: string
   ip: string
   public_ipv4s?: PublicIPv4Assignment[]
@@ -100,6 +105,7 @@ export interface Container {
   port_mappings: PortMapping[]
   port_mapping_limit: number
   firewall_enabled: boolean
+  firewall_default_action: 'ACCEPT' | 'DROP'
   firewall_rules: FirewallRule[]
   snapshot_limit: number
   created_at: string
@@ -136,11 +142,15 @@ export interface CreateContainerRequest {
   ram_mb: number
   disk_gb: number
   network_bw_mbps: number
+  network_down_mbps: number
+  network_up_mbps: number
   monthly_traffic_gb: number
   traffic_mode: string
   traffic_in_gb: number
   traffic_out_gb: number
   io_speed_mbps: number
+  io_read_mbps: number
+  io_write_mbps: number
   extra_ports: number[]
   port_mapping_count: number
   assign_nat?: boolean
@@ -486,8 +496,12 @@ export const updateTrafficLimit = (id: ContainerIdentifier, data: {
 export const updateResourceLimit = (id: ContainerIdentifier, data: {
   vcpu: number
   ram_mb: number
-  io_speed_mbps: number
-  network_bw_mbps: number
+  io_speed_mbps?: number
+  io_read_mbps?: number
+  io_write_mbps?: number
+  network_bw_mbps?: number
+  network_down_mbps?: number
+  network_up_mbps?: number
 }) =>
   api.put<APIResponse>(`/containers/${id}/resource-limit`, data)
 
@@ -501,10 +515,10 @@ export const deletePortMapping = (id: ContainerIdentifier, index: number) =>
   api.delete<APIResponse<PortMapping[]>>(`/containers/${id}/port-mappings/${index}`)
 
 export const getFirewall = (id: ContainerIdentifier) =>
-  api.get<APIResponse<{ enabled: boolean; rules: FirewallRule[] }>>(`/containers/${id}/firewall`)
+  api.get<APIResponse<{ enabled: boolean; default_action: 'ACCEPT' | 'DROP'; rules: FirewallRule[] }>>(`/containers/${id}/firewall`)
 
-export const updateFirewall = (id: ContainerIdentifier, data: { enabled?: boolean; rules?: FirewallRule[] }) =>
-  api.put<APIResponse<{ enabled: boolean; rules: FirewallRule[] }>>(`/containers/${id}/firewall`, data)
+export const updateFirewall = (id: ContainerIdentifier, data: { enabled?: boolean; default_action?: 'ACCEPT' | 'DROP'; rules?: FirewallRule[] }) =>
+  api.put<APIResponse<{ enabled: boolean; default_action: 'ACCEPT' | 'DROP'; rules: FirewallRule[] }>>(`/containers/${id}/firewall`, data)
 
 export const updateContainerExpiry = (id: ContainerIdentifier, expiresAt: string) =>
   api.put<APIResponse>(`/containers/${id}/expiry`, { expires_at: expiresAt })

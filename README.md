@@ -2,7 +2,7 @@
   <img src="frontend/public/favicon.svg" width="96" alt="CLICD">
 </p>
 
-<h1 align="center">CLICD</h1>
+<h1 align="center">CLICD <sub></sub></h1>
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white">
@@ -73,7 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh 
 | 虚拟化管理 | 在同一个面板里管理 LXC 容器和 KVM 虚拟机，支持创建、重装、开机、关机、重启、删除、重置密码、到期时间和批量操作。 |
 | 镜像与模板 | 内置模板和镜像管理，支持 Ubuntu、Debian、Alpine、CentOS、Arch Linux、Fedora、Rocky Linux 等常见发行版，镜像可按需下载、取消、启用、禁用和清理缓存。 |
 | 网络能力 | 支持 NAT4 端口配额、随机可用端口、TCP/UDP 端口映射、公网 IPv4 池管理、IPv6 前缀检测、IPv6 状态检查和容器级 IPv6 分配。 |
-| 资源限制 | 支持 CPU、内存、磁盘、Swap、带宽用量、流量重置、流量限制和资源限制管理；容器到期或超额后可自动关机，避免资源和流量失控。 |
+| 资源限制 | 支持 CPU、内存、磁盘、Swap、独立上行/下行带宽、读/写 I/O 限速、流量重置、流量限制和资源限制管理；容器到期或超额后可自动关机，避免资源和流量失控。 |
 | 远程控制 | 内置 WebSSH 和 WebVNC 票据访问，用户可以直接在浏览器打开终端或控制台，不需要手动复制连接信息。 |
 | 快照能力 | 支持快照总览、容器快照、创建快照、删除快照、恢复快照、计划快照和快照配额。 |
 | 安全告警 | 基于 conntrack 做轻量安全检测，可识别端口扫描、横向扫描、爆破倾向、SMTP 滥用、UDP 反射、挖矿端口、代理/VPN/Tor 等风险，并提供安全日志、汇总和设置项。 |

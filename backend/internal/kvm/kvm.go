@@ -346,6 +346,7 @@ func normalizeQCOW2(ctx context.Context, src, target string) error {
 }
 
 func (m *Manager) CreateContainer(cfg lxc.ContainerConfig) error {
+	cfg.NormalizeResourceAliases()
 	image := FindImage(cfg.TemplateID)
 	if image == nil {
 		return fmt.Errorf("KVM image not found: %s", cfg.TemplateID)
@@ -456,7 +457,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, ipv6List, ipv4List); err != nil {
 			return nil, err
 		}
-		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps)
+		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps)
 	} else {
 		if image.Desktop != "" {
 			if cfg.RAMMB < 2048 {
@@ -472,7 +473,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, ipv4List, *image, sshAuthMode); err != nil {
 			return nil, err
 		}
-		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps, image.Desktop != "")
+		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps, image.Desktop != "")
 	}
 	xmlPath := filepath.Join(m.instanceDir(vmName), "domain.xml")
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
@@ -542,12 +543,16 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		RAMMB:            cfg.RAMMB,
 		DiskGB:           cfg.DiskGB,
 		NetworkBWMbps:    cfg.NetworkBWMbps,
+		NetworkDownMbps:  cfg.NetworkDownMbps,
+		NetworkUpMbps:    cfg.NetworkUpMbps,
 		MonthlyTrafficGB: cfg.MonthlyTrafficGB,
 		TrafficMode:      trafficMode,
 		TrafficInGB:      cfg.TrafficInGB,
 		TrafficOutGB:     cfg.TrafficOutGB,
 		TrafficResetDate: now[:7],
 		IOSpeedMBps:      cfg.IOSpeedMBps,
+		IOReadMBps:       cfg.IOReadMBps,
+		IOWriteMBps:      cfg.IOWriteMBps,
 		PublicIPv4s:      publicIPv4s,
 		IPv6Addresses:    ipv6Assignments,
 		Status:           "stopped",
@@ -781,11 +786,15 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...lx
 		RAMMB:            c.RAMMB,
 		DiskGB:           c.DiskGB,
 		NetworkBWMbps:    c.NetworkBWMbps,
+		NetworkDownMbps:  c.NetworkDownMbps,
+		NetworkUpMbps:    c.NetworkUpMbps,
 		MonthlyTrafficGB: c.MonthlyTrafficGB,
 		TrafficMode:      c.TrafficMode,
 		TrafficInGB:      c.TrafficInGB,
 		TrafficOutGB:     c.TrafficOutGB,
 		IOSpeedMBps:      c.IOSpeedMBps,
+		IOReadMBps:       c.IOReadMBps,
+		IOWriteMBps:      c.IOWriteMBps,
 		PortMappingCount: c.PortMappingLimit,
 		SnapshotLimit:    c.SnapshotLimit,
 		ExpiresAt:        c.ExpiresAt,
@@ -882,6 +891,7 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 	if c == nil || !c.IsKVM() {
 		return nil
 	}
+	config.NormalizeContainerResourceAliases(c)
 	if c.Status == "running" {
 		// Config already saved; domain definition will be refreshed on next start
 		return nil
@@ -893,10 +903,10 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 	if IsWindowsImage(c.Template) {
 		winISO := ImagePath(c.Template)
 		unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
-		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps)
+		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps, isKVMDesktopTemplate(c.Template))
+		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template))
 	}
 	xmlPath := filepath.Join(m.instanceDir(c.VirshName()), "domain.xml")
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
@@ -913,15 +923,16 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 	if c == nil || !c.IsKVM() || c.DiskImage == "" || c.MACAddress == "" {
 		return nil
 	}
+	config.NormalizeContainerResourceAliases(c)
 	var xml string
 	xmlPath := filepath.Join(m.instanceDir(c.VirshName()), "domain.xml")
 	if IsWindowsImage(c.Template) {
 		winISO := ImagePath(c.Template)
 		unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
-		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps)
+		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOSpeedMBps, c.NetworkBWMbps, isKVMDesktopTemplate(c.Template))
+		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template))
 	}
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
 		return err
@@ -2079,7 +2090,7 @@ func isKVMDesktopTemplate(templateID string) bool {
 	return image != nil && image.Desktop != ""
 }
 
-func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioSpeedMBps int, networkBWMbps int, desktop bool) string {
+func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool) string {
 	if vcpu < 1 {
 		vcpu = 1
 	}
@@ -2087,21 +2098,32 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
 		ramMB = 512
 	}
 	iotune := ""
-	if ioSpeedMBps > 0 {
-		bytesPerSecond := int64(ioSpeedMBps) * 1024 * 1024
+	if ioReadMBps > 0 || ioWriteMBps > 0 {
+		var parts []string
+		if ioReadMBps > 0 {
+			parts = append(parts, fmt.Sprintf("        <read_bytes_sec>%d</read_bytes_sec>", int64(ioReadMBps)*1024*1024))
+		}
+		if ioWriteMBps > 0 {
+			parts = append(parts, fmt.Sprintf("        <write_bytes_sec>%d</write_bytes_sec>", int64(ioWriteMBps)*1024*1024))
+		}
 		iotune = fmt.Sprintf(`
       <iotune>
-        <total_bytes_sec>%d</total_bytes_sec>
-      </iotune>`, bytesPerSecond)
+%s
+      </iotune>`, strings.Join(parts, "\n"))
 	}
 	bandwidth := ""
-	if networkBWMbps > 0 {
-		averageKiB := networkBWMbps * 128
+	if networkDownMbps > 0 || networkUpMbps > 0 {
+		var parts []string
+		if networkDownMbps > 0 {
+			parts = append(parts, fmt.Sprintf("        <inbound average='%d'/>", networkDownMbps*128))
+		}
+		if networkUpMbps > 0 {
+			parts = append(parts, fmt.Sprintf("        <outbound average='%d'/>", networkUpMbps*128))
+		}
 		bandwidth = fmt.Sprintf(`
       <bandwidth>
-        <inbound average='%d'/>
-        <outbound average='%d'/>
-      </bandwidth>`, averageKiB, averageKiB)
+%s
+      </bandwidth>`, strings.Join(parts, "\n"))
 	}
 	video := "<video><model type='virtio'/></video>"
 	input := ""
@@ -2158,7 +2180,7 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
 </domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, xmlEscape(diskPath), iotune, xmlEscape(seedPath), xmlEscape(mac), bandwidth, input, video)
 }
 
-func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioSpeedMBps int, networkBWMbps int) string {
+func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int) string {
 	if vcpu < 1 {
 		vcpu = 1
 	}
@@ -2166,21 +2188,32 @@ func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, un
 		ramMB = 2048
 	}
 	iotune := ""
-	if ioSpeedMBps > 0 {
-		bytesPerSecond := int64(ioSpeedMBps) * 1024 * 1024
+	if ioReadMBps > 0 || ioWriteMBps > 0 {
+		var parts []string
+		if ioReadMBps > 0 {
+			parts = append(parts, fmt.Sprintf("        <read_bytes_sec>%d</read_bytes_sec>", int64(ioReadMBps)*1024*1024))
+		}
+		if ioWriteMBps > 0 {
+			parts = append(parts, fmt.Sprintf("        <write_bytes_sec>%d</write_bytes_sec>", int64(ioWriteMBps)*1024*1024))
+		}
 		iotune = fmt.Sprintf(`
       <iotune>
-        <total_bytes_sec>%d</total_bytes_sec>
-      </iotune>`, bytesPerSecond)
+%s
+      </iotune>`, strings.Join(parts, "\n"))
 	}
 	bandwidth := ""
-	if networkBWMbps > 0 {
-		averageKiB := networkBWMbps * 128
+	if networkDownMbps > 0 || networkUpMbps > 0 {
+		var parts []string
+		if networkDownMbps > 0 {
+			parts = append(parts, fmt.Sprintf("        <inbound average='%d'/>", networkDownMbps*128))
+		}
+		if networkUpMbps > 0 {
+			parts = append(parts, fmt.Sprintf("        <outbound average='%d'/>", networkUpMbps*128))
+		}
 		bandwidth = fmt.Sprintf(`
       <bandwidth>
-        <inbound average='%d'/>
-        <outbound average='%d'/>
-      </bandwidth>`, averageKiB, averageKiB)
+%s
+      </bandwidth>`, strings.Join(parts, "\n"))
 	}
 	virtioWinISO := virtioWinISOPath()
 	unattendDisk := ""
@@ -3231,6 +3264,11 @@ func (m *Manager) applyIPv6Runtime(c *config.Container) error {
 		}
 		ensureKVMIPv6NAT66(assignment.Address, uplink)
 	}
+	if c.Status == "running" {
+		if err := lxc.ApplyFirewallRules(c.ID); err != nil {
+			fmt.Printf("Warning: failed to re-apply firewall rules after KVM IPv6 setup for %s: %v\n", c.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -3307,7 +3345,7 @@ func ensureKVMIPv6ForwardRules(ipv6 string, bridge string) {
 	}
 	for _, rule := range rules {
 		check := append([]string{"-C"}, rule...)
-		add := append([]string{"-I"}, append([]string{rule[0], "1"}, rule[1:]...)...)
+		add := append([]string{"-A"}, rule...)
 		if exec.Command("ip6tables", check...).Run() != nil {
 			exec.Command("ip6tables", add...).Run()
 		}

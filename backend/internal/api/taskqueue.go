@@ -98,6 +98,7 @@ func (q *TaskQueue) EnqueueWithAudit(containerID int, containerName string, task
 	}
 	if cfg != nil {
 		task.Config = *cfg
+		task.Config.NormalizeResourceAliases()
 	}
 	q.enqueueTask(task)
 	q.persistTasks()
@@ -162,6 +163,7 @@ func (q *TaskQueue) enqueueBatchCreateList(configs []lxc.ContainerConfig, user s
 	var result []string
 	for _, cfg := range configs {
 		cfgCopy := cfg
+		cfgCopy.NormalizeResourceAliases()
 		id := q.nextID
 		q.nextID++
 		task := &Task{
@@ -246,6 +248,7 @@ func (q *TaskQueue) createWorker() {
 		if task.Config.Name == "" {
 			task.Config.Name = task.ContainerName
 		}
+		task.Config.NormalizeResourceAliases()
 		if task.Config.Name == "" {
 			task.Status = "failed"
 			task.Error = "container name is required"
@@ -592,6 +595,11 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 		if req.Containers[i].VCPU <= 0 {
 			req.Containers[i].VCPU = 1
 		}
+		if err := rejectNegativeCreateLimits(req.Containers[i]); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": " + err.Error()})
+			return
+		}
+		req.Containers[i].NormalizeResourceAliases()
 		req.Containers[i].Virtualization = runtimeFromRequest(req.Containers[i].Virtualization)
 		if req.Containers[i].RAMMB < 128 {
 			req.Containers[i].RAMMB = 512
@@ -820,6 +828,7 @@ func RestoreTasks() {
 		if cfg.Name == "" {
 			cfg.Name = containerName
 		}
+		cfg.NormalizeResourceAliases()
 		containerID := st.ContainerID
 		if containerID <= 0 && containerName != "" {
 			if c := config.FindContainerByName(containerName); c != nil {

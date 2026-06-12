@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -210,8 +212,19 @@ func listContainers(w http.ResponseWriter, r *http.Request) {
 
 func createContainer(w http.ResponseWriter, r *http.Request) {
 	var cfg lxc.ContainerConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	_ = json.Unmarshal(body, &fields)
+	if err := normalizeCreateResourceLimits(&cfg, fields); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
 	if cfg.Name == "" {
@@ -386,10 +399,14 @@ func updateTrafficLimit(w http.ResponseWriter, r *http.Request, id int) {
 
 func updateResourceLimit(w http.ResponseWriter, r *http.Request, id int) {
 	var req struct {
-		VCPU   float64 `json:"vcpu"`
-		RAMMB  int     `json:"ram_mb"`
-		IOMBps int     `json:"io_speed_mbps"`
-		BWMbps int     `json:"network_bw_mbps"`
+		VCPU            *float64 `json:"vcpu"`
+		RAMMB           *int     `json:"ram_mb"`
+		IOMBps          *int     `json:"io_speed_mbps"`
+		IOReadMBps      *int     `json:"io_read_mbps"`
+		IOWriteMBps     *int     `json:"io_write_mbps"`
+		BWMbps          *int     `json:"network_bw_mbps"`
+		NetworkDownMbps *int     `json:"network_down_mbps"`
+		NetworkUpMbps   *int     `json:"network_up_mbps"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request"})
@@ -404,21 +421,35 @@ func updateResourceLimit(w http.ResponseWriter, r *http.Request, id int) {
 	// Update config
 	nextVCPU := c.VCPU
 	nextRAMMB := c.RAMMB
-	if req.VCPU > 0 {
-		nextVCPU = req.VCPU
+	if req.VCPU != nil {
+		nextVCPU = *req.VCPU
 	}
-	if req.RAMMB > 0 {
-		nextRAMMB = req.RAMMB
+	if req.RAMMB != nil {
+		nextRAMMB = *req.RAMMB
 	}
 	if err := validateRuntimeResourceRequest(c.Runtime(), nextVCPU, nextRAMMB, c.DiskGB); err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
+	for name, value := range map[string]*int{
+		"network_bw_mbps":   req.BWMbps,
+		"network_down_mbps": req.NetworkDownMbps,
+		"network_up_mbps":   req.NetworkUpMbps,
+		"io_speed_mbps":     req.IOMBps,
+		"io_read_mbps":      req.IOReadMBps,
+		"io_write_mbps":     req.IOWriteMBps,
+	} {
+		if err := rejectNegativeLimit(name, value); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+	}
 
 	c.VCPU = nextVCPU
 	c.RAMMB = nextRAMMB
-	c.IOSpeedMBps = req.IOMBps
-	c.NetworkBWMbps = req.BWMbps
+	applyNetworkLimitPatch(c, req.BWMbps, req.NetworkDownMbps, req.NetworkUpMbps)
+	applyIOLimitPatch(c, req.IOMBps, req.IOReadMBps, req.IOWriteMBps)
+	config.NormalizeContainerResourceAliases(c)
 	config.SaveConfig()
 
 	// Re-apply resource limits to running container
@@ -434,6 +465,114 @@ func updateResourceLimit(w http.ResponseWriter, r *http.Request, id int) {
 		msg = "资源已保存，请关机重启虚拟机后生效"
 	}
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: msg})
+}
+
+func normalizeCreateResourceLimits(cfg *lxc.ContainerConfig, fields map[string]json.RawMessage) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := rejectNegativeCreateLimits(*cfg); err != nil {
+		return err
+	}
+	bwSet := hasJSONField(fields, "network_bw_mbps")
+	downSet := hasJSONField(fields, "network_down_mbps")
+	upSet := hasJSONField(fields, "network_up_mbps")
+	if bwSet {
+		if !downSet {
+			cfg.NetworkDownMbps = cfg.NetworkBWMbps
+		}
+		if !upSet {
+			cfg.NetworkUpMbps = cfg.NetworkBWMbps
+		}
+	}
+	ioSet := hasJSONField(fields, "io_speed_mbps")
+	readSet := hasJSONField(fields, "io_read_mbps")
+	writeSet := hasJSONField(fields, "io_write_mbps")
+	if ioSet {
+		if !readSet {
+			cfg.IOReadMBps = cfg.IOSpeedMBps
+		}
+		if !writeSet {
+			cfg.IOWriteMBps = cfg.IOSpeedMBps
+		}
+	}
+	cfg.NormalizeResourceAliases()
+	return nil
+}
+
+func rejectNegativeCreateLimits(cfg lxc.ContainerConfig) error {
+	for name, value := range map[string]int{
+		"network_bw_mbps":   cfg.NetworkBWMbps,
+		"network_down_mbps": cfg.NetworkDownMbps,
+		"network_up_mbps":   cfg.NetworkUpMbps,
+		"io_speed_mbps":     cfg.IOSpeedMBps,
+		"io_read_mbps":      cfg.IOReadMBps,
+		"io_write_mbps":     cfg.IOWriteMBps,
+	} {
+		if value < 0 {
+			return fmt.Errorf("%s cannot be negative", name)
+		}
+	}
+	return nil
+}
+
+func hasJSONField(fields map[string]json.RawMessage, name string) bool {
+	if fields == nil {
+		return false
+	}
+	_, ok := fields[name]
+	return ok
+}
+
+func rejectNegativeLimit(name string, value *int) error {
+	if value != nil && *value < 0 {
+		return fmt.Errorf("%s cannot be negative", name)
+	}
+	return nil
+}
+
+func applyNetworkLimitPatch(c *config.Container, legacy *int, down *int, up *int) {
+	if c == nil {
+		return
+	}
+	config.NormalizeContainerResourceAliases(c)
+	nextDown := c.NetworkDownMbps
+	nextUp := c.NetworkUpMbps
+	if legacy != nil {
+		nextDown = *legacy
+		nextUp = *legacy
+	}
+	if down != nil {
+		nextDown = *down
+	}
+	if up != nil {
+		nextUp = *up
+	}
+	c.NetworkDownMbps = nextDown
+	c.NetworkUpMbps = nextUp
+	c.NetworkBWMbps = config.LegacySymmetricLimit(nextDown, nextUp)
+}
+
+func applyIOLimitPatch(c *config.Container, legacy *int, read *int, write *int) {
+	if c == nil {
+		return
+	}
+	config.NormalizeContainerResourceAliases(c)
+	nextRead := c.IOReadMBps
+	nextWrite := c.IOWriteMBps
+	if legacy != nil {
+		nextRead = *legacy
+		nextWrite = *legacy
+	}
+	if read != nil {
+		nextRead = *read
+	}
+	if write != nil {
+		nextWrite = *write
+	}
+	c.IOReadMBps = nextRead
+	c.IOWriteMBps = nextWrite
+	c.IOSpeedMBps = config.LegacySymmetricLimit(nextRead, nextWrite)
 }
 
 func getRandomPort(w http.ResponseWriter, r *http.Request, id int) {

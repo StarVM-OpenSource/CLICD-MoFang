@@ -28,11 +28,15 @@ type savedTaskConfig struct {
 	RAMMB            int      `json:"ram_mb"`
 	DiskGB           int      `json:"disk_gb"`
 	NetworkBWMbps    int      `json:"network_bw_mbps"`
+	NetworkDownMbps  int      `json:"network_down_mbps"`
+	NetworkUpMbps    int      `json:"network_up_mbps"`
 	MonthlyTrafficGB int      `json:"monthly_traffic_gb"`
 	TrafficMode      string   `json:"traffic_mode"`
 	TrafficInGB      int      `json:"traffic_in_gb"`
 	TrafficOutGB     int      `json:"traffic_out_gb"`
 	IOSpeedMBps      int      `json:"io_speed_mbps"`
+	IOReadMBps       int      `json:"io_read_mbps"`
+	IOWriteMBps      int      `json:"io_write_mbps"`
 	ExtraPorts       []int    `json:"extra_ports"`
 	PortMappingCount int      `json:"port_mapping_count"`
 	AssignNAT        *bool    `json:"assign_nat,omitempty"`
@@ -55,15 +59,52 @@ func parseSavedTaskConfig(raw string) savedTaskConfig {
 	}
 	var cfg savedTaskConfig
 	_ = json.Unmarshal([]byte(raw), &cfg)
+	normalizeSavedTaskConfigLimits(&cfg)
 	return cfg
 }
 
 func encodeSavedTaskConfig(cfg savedTaskConfig) string {
+	normalizeSavedTaskConfigLimits(&cfg)
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return ""
 	}
 	return string(data)
+}
+
+func normalizeSavedTaskConfigLimits(cfg *savedTaskConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.NetworkBWMbps < 0 {
+		cfg.NetworkBWMbps = 0
+	}
+	if cfg.NetworkDownMbps < 0 {
+		cfg.NetworkDownMbps = 0
+	}
+	if cfg.NetworkUpMbps < 0 {
+		cfg.NetworkUpMbps = 0
+	}
+	if cfg.NetworkDownMbps == 0 && cfg.NetworkUpMbps == 0 && cfg.NetworkBWMbps > 0 {
+		cfg.NetworkDownMbps = cfg.NetworkBWMbps
+		cfg.NetworkUpMbps = cfg.NetworkBWMbps
+	}
+	cfg.NetworkBWMbps = LegacySymmetricLimit(cfg.NetworkDownMbps, cfg.NetworkUpMbps)
+
+	if cfg.IOSpeedMBps < 0 {
+		cfg.IOSpeedMBps = 0
+	}
+	if cfg.IOReadMBps < 0 {
+		cfg.IOReadMBps = 0
+	}
+	if cfg.IOWriteMBps < 0 {
+		cfg.IOWriteMBps = 0
+	}
+	if cfg.IOReadMBps == 0 && cfg.IOWriteMBps == 0 && cfg.IOSpeedMBps > 0 {
+		cfg.IOReadMBps = cfg.IOSpeedMBps
+		cfg.IOWriteMBps = cfg.IOSpeedMBps
+	}
+	cfg.IOSpeedMBps = LegacySymmetricLimit(cfg.IOReadMBps, cfg.IOWriteMBps)
 }
 
 func encodeStringSlice(values []string) string {
@@ -148,6 +189,8 @@ func ensureSchema() error {
 			ram_mb INTEGER,
 			disk_gb INTEGER,
 			network_bw_mbps INTEGER,
+			network_down_mbps INTEGER NOT NULL DEFAULT 0,
+			network_up_mbps INTEGER NOT NULL DEFAULT 0,
 			monthly_traffic_gb INTEGER,
 			traffic_mode TEXT,
 			traffic_in_gb INTEGER,
@@ -156,6 +199,8 @@ func ensureSchema() error {
 			traffic_used_tx INTEGER,
 			traffic_reset_date TEXT,
 			io_speed_mbps INTEGER,
+			io_read_mbps INTEGER NOT NULL DEFAULT 0,
+			io_write_mbps INTEGER NOT NULL DEFAULT 0,
 			status TEXT,
 			ip TEXT,
 			ipv6 TEXT,
@@ -282,11 +327,15 @@ func ensureSchema() error {
 			cfg_ram_mb INTEGER,
 			cfg_disk_gb INTEGER,
 			cfg_network_bw_mbps INTEGER,
+			cfg_network_down_mbps INTEGER NOT NULL DEFAULT 0,
+			cfg_network_up_mbps INTEGER NOT NULL DEFAULT 0,
 			cfg_monthly_traffic_gb INTEGER,
 			cfg_traffic_mode TEXT,
 			cfg_traffic_in_gb INTEGER,
 			cfg_traffic_out_gb INTEGER,
 			cfg_io_speed_mbps INTEGER,
+			cfg_io_read_mbps INTEGER NOT NULL DEFAULT 0,
+			cfg_io_write_mbps INTEGER NOT NULL DEFAULT 0,
 			cfg_port_mapping_count INTEGER,
 			cfg_assign_nat INTEGER,
 			cfg_snapshot_limit INTEGER,
@@ -340,6 +389,7 @@ func ensureSchema() error {
 }
 
 func ensureSchemaMigrations() error {
+	added := map[string]bool{}
 	for _, column := range []struct {
 		table string
 		name  string
@@ -352,6 +402,10 @@ func ensureSchemaMigrations() error {
 		{"api_keys", "last_used_ip", "TEXT"},
 		{"tasks", "ip", "TEXT"},
 		{"tasks", "user_agent", "TEXT"},
+		{"tasks", "cfg_network_down_mbps", "INTEGER NOT NULL DEFAULT 0"},
+		{"tasks", "cfg_network_up_mbps", "INTEGER NOT NULL DEFAULT 0"},
+		{"tasks", "cfg_io_read_mbps", "INTEGER NOT NULL DEFAULT 0"},
+		{"tasks", "cfg_io_write_mbps", "INTEGER NOT NULL DEFAULT 0"},
 		{"tasks", "cfg_assign_ipv4", "INTEGER"},
 		{"tasks", "cfg_ipv4_count", "INTEGER"},
 		{"tasks", "cfg_public_ipv4s", "TEXT"},
@@ -364,20 +418,61 @@ func ensureSchemaMigrations() error {
 		{"port_mappings", "host_ip", "TEXT"},
 		{"container_public_ipv4s", "prefix_len", "INTEGER"},
 		{"container_public_ipv4s", "gateway", "TEXT"},
+		{"containers", "network_down_mbps", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "network_up_mbps", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "io_read_mbps", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "io_write_mbps", "INTEGER NOT NULL DEFAULT 0"},
 		{"containers", "firewall_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "firewall_default_action", "TEXT NOT NULL DEFAULT 'DROP'"},
 		{"containers", "firewall_rules", "TEXT"},
 	} {
-		if err := ensureColumn(column.table, column.name, column.def); err != nil {
+		wasAdded, err := ensureColumn(column.table, column.name, column.def)
+		if err != nil {
+			return err
+		}
+		if wasAdded {
+			added[column.table+"."+column.name] = true
+		}
+	}
+	if added["containers.network_down_mbps"] || added["containers.network_up_mbps"] {
+		if _, err := db.Exec(`UPDATE containers
+			SET network_down_mbps = COALESCE(NULLIF(network_down_mbps, 0), COALESCE(network_bw_mbps, 0)),
+			    network_up_mbps = COALESCE(NULLIF(network_up_mbps, 0), COALESCE(network_bw_mbps, 0))
+			WHERE COALESCE(network_bw_mbps, 0) > 0`); err != nil {
+			return err
+		}
+	}
+	if added["containers.io_read_mbps"] || added["containers.io_write_mbps"] {
+		if _, err := db.Exec(`UPDATE containers
+			SET io_read_mbps = COALESCE(NULLIF(io_read_mbps, 0), COALESCE(io_speed_mbps, 0)),
+			    io_write_mbps = COALESCE(NULLIF(io_write_mbps, 0), COALESCE(io_speed_mbps, 0))
+			WHERE COALESCE(io_speed_mbps, 0) > 0`); err != nil {
+			return err
+		}
+	}
+	if added["tasks.cfg_network_down_mbps"] || added["tasks.cfg_network_up_mbps"] {
+		if _, err := db.Exec(`UPDATE tasks
+			SET cfg_network_down_mbps = COALESCE(NULLIF(cfg_network_down_mbps, 0), COALESCE(cfg_network_bw_mbps, 0)),
+			    cfg_network_up_mbps = COALESCE(NULLIF(cfg_network_up_mbps, 0), COALESCE(cfg_network_bw_mbps, 0))
+			WHERE COALESCE(cfg_network_bw_mbps, 0) > 0`); err != nil {
+			return err
+		}
+	}
+	if added["tasks.cfg_io_read_mbps"] || added["tasks.cfg_io_write_mbps"] {
+		if _, err := db.Exec(`UPDATE tasks
+			SET cfg_io_read_mbps = COALESCE(NULLIF(cfg_io_read_mbps, 0), COALESCE(cfg_io_speed_mbps, 0)),
+			    cfg_io_write_mbps = COALESCE(NULLIF(cfg_io_write_mbps, 0), COALESCE(cfg_io_speed_mbps, 0))
+			WHERE COALESCE(cfg_io_speed_mbps, 0) > 0`); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func ensureColumn(table, name, def string) error {
+func ensureColumn(table, name, def string) (bool, error) {
 	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -386,17 +481,17 @@ func ensureColumn(table, name, def string) error {
 		var notNull, pk int
 		var defaultValue interface{}
 		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return false, err
 		}
 		if columnName == name {
-			return nil
+			return false, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
 	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + def)
-	return err
+	return err == nil, err
 }
 
 func loadConfigFromDB() (*ClicdConfig, bool, error) {
@@ -577,26 +672,31 @@ func saveMeta(tx *sql.Tx) error {
 
 func saveContainers(tx *sql.Tx) error {
 	for _, c := range AppConfig.Containers {
+		NormalizeContainerResourceAliases(&c)
 		if _, err := tx.Exec(`INSERT INTO containers (
 			id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, mac_address, template,
-			vcpu, ram_mb, disk_gb, network_bw_mbps, monthly_traffic_gb, traffic_mode, traffic_in_gb,
-			traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date, io_speed_mbps,
+			vcpu, ram_mb, disk_gb, network_bw_mbps, network_down_mbps, network_up_mbps,
+			monthly_traffic_gb, traffic_mode, traffic_in_gb,
+			traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
+			io_speed_mbps, io_read_mbps, io_write_mbps,
 			status, ip, ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
 			ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 			snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 			snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
-			firewall_enabled, firewall_rules
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			firewall_enabled, firewall_default_action, firewall_rules
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.MACAddress, c.Template,
-			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
-			c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate, c.IOSpeedMBps,
+			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
+			c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
+			c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
+			c.IOSpeedMBps, c.IOReadMBps, c.IOWriteMBps,
 			c.Status, c.IP, c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
 			c.SSHHostKey, c.PortMappingLimit, c.SnapshotLimit, c.CreatedAt, c.ExpiresAt,
 			boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
 			c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
 			boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
-			boolInt(c.FirewallEnabled), marshalFirewallRules(c.FirewallRules),
+			boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules),
 		); err != nil {
 			return err
 		}
@@ -731,15 +831,19 @@ func saveTasksDB(tx *sql.Tx) error {
 		if _, err := tx.Exec(`INSERT INTO tasks(
 			id, type, container_id, container_name, status, error, created_at, template_id, user, ip, user_agent,
 			cfg_name, cfg_virtualization, cfg_template_id, cfg_vcpu, cfg_cpu_percent, cfg_ram_mb, cfg_disk_gb,
-			cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
-			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
+			cfg_network_bw_mbps, cfg_network_down_mbps, cfg_network_up_mbps,
+			cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
+			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_io_read_mbps, cfg_io_write_mbps,
+			cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
 			cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
 			cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
 			cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
-			cfg.NetworkBWMbps, cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
-			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.SnapshotLimit,
+			cfg.NetworkBWMbps, cfg.NetworkDownMbps, cfg.NetworkUpMbps,
+			cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
+			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.IOReadMBps, cfg.IOWriteMBps,
+			cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.SnapshotLimit,
 			boolInt(cfg.AssignIPv4), cfg.IPv4Count, encodeStringSlice(cfg.PublicIPv4s),
 			boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses),
 			cfg.SSHAuthMode, cfg.SSHPassword, cfg.SSHPublicKey, cfg.ExpiresAt,
@@ -787,14 +891,16 @@ func saveSnapshots(tx *sql.Tx) error {
 func loadContainers() ([]Container, error) {
 	rows, err := db.Query(`SELECT
 		id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, mac_address, template,
-		vcpu, ram_mb, disk_gb, network_bw_mbps, monthly_traffic_gb, traffic_mode, traffic_in_gb,
-		traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date, io_speed_mbps,
+		vcpu, ram_mb, disk_gb, network_bw_mbps, network_down_mbps, network_up_mbps,
+		monthly_traffic_gb, traffic_mode, traffic_in_gb,
+		traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
+		io_speed_mbps, io_read_mbps, io_write_mbps,
 		status, ip, ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
 		ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 		policy_blocked, policy_blocked_reason, policy_blocked_at,
-		firewall_enabled, firewall_rules
+		firewall_enabled, firewall_default_action, firewall_rules
 		FROM containers ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -805,26 +911,31 @@ func loadContainers() ([]Container, error) {
 	for rows.Next() {
 		var c Container
 		var scheduleEnabled, policyBlocked, firewallEnabled int
+		var firewallDefaultAction string
 		var firewallRulesJSON sql.NullString
 		if err := rows.Scan(
 			&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &c.MACAddress, &c.Template,
-			&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
-			&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate, &c.IOSpeedMBps,
+			&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
+			&c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
+			&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate,
+			&c.IOSpeedMBps, &c.IOReadMBps, &c.IOWriteMBps,
 			&c.Status, &c.IP, &c.IPv6, &c.IPv6PrefixLen, &c.IPv6Interface, &c.VNCPort, &c.SSHPort, &c.SSHPassword,
 			&c.SSHHostKey, &c.PortMappingLimit, &c.SnapshotLimit, &c.CreatedAt, &c.ExpiresAt,
 			&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
 			&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
 			&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
-			&firewallEnabled, &firewallRulesJSON,
+			&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON,
 		); err != nil {
 			return nil, err
 		}
 		c.SnapshotScheduleEnabled = scheduleEnabled != 0
 		c.PolicyBlocked = policyBlocked != 0
 		c.FirewallEnabled = firewallEnabled != 0
+		c.FirewallDefaultAction = normalizeFirewallDefaultAction(firewallDefaultAction)
 		if firewallRulesJSON.Valid && strings.TrimSpace(firewallRulesJSON.String) != "" {
 			_ = json.Unmarshal([]byte(firewallRulesJSON.String), &c.FirewallRules)
 		}
+		NormalizeContainerResourceAliases(&c)
 		result = append(result, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -1018,8 +1129,10 @@ func loadTasks() ([]SavedTask, error) {
 	rows, err := db.Query(`SELECT
 		id, type, container_id, container_name, status, error, created_at, template_id, user, ip, user_agent,
 		cfg_name, cfg_virtualization, cfg_template_id, cfg_vcpu, cfg_cpu_percent, cfg_ram_mb, cfg_disk_gb,
-		cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
-		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
+		cfg_network_bw_mbps, cfg_network_down_mbps, cfg_network_up_mbps,
+		cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
+		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_io_read_mbps, cfg_io_write_mbps,
+		cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
 		cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
 		cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_expires_at
 		FROM tasks ORDER BY created_at, id`)
@@ -1039,8 +1152,10 @@ func loadTasks() ([]SavedTask, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User, &ip, &userAgent,
 			&cfg.Name, &cfg.Virtualization, &cfg.TemplateID, &cfg.VCPU, &cfg.CPUPercent, &cfg.RAMMB, &cfg.DiskGB,
-			&cfg.NetworkBWMbps, &cfg.MonthlyTrafficGB, &cfg.TrafficMode, &cfg.TrafficInGB,
-			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.PortMappingCount, &assignNAT, &cfg.SnapshotLimit,
+			&cfg.NetworkBWMbps, &cfg.NetworkDownMbps, &cfg.NetworkUpMbps,
+			&cfg.MonthlyTrafficGB, &cfg.TrafficMode, &cfg.TrafficInGB,
+			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.IOReadMBps, &cfg.IOWriteMBps,
+			&cfg.PortMappingCount, &assignNAT, &cfg.SnapshotLimit,
 			&assignIPv4, &ipv4Count, &publicIPv4s, &assignIPv6, &ipv6Count, &ipv6Addresses,
 			&sshAuthMode, &sshPassword, &sshPublicKey, &cfg.ExpiresAt,
 		); err != nil {
@@ -1065,6 +1180,7 @@ func loadTasks() ([]SavedTask, error) {
 		cfg.SSHAuthMode = sshAuthMode.String
 		cfg.SSHPassword = sshPassword.String
 		cfg.SSHPublicKey = sshPublicKey.String
+		normalizeSavedTaskConfigLimits(&cfg)
 		result = append(result, t)
 		configs = append(configs, cfg)
 	}
@@ -1187,6 +1303,14 @@ func marshalFirewallRules(rules []FirewallRule) interface{} {
 		return nil
 	}
 	return string(data)
+}
+
+func normalizeFirewallDefaultAction(action string) string {
+	action = strings.ToUpper(strings.TrimSpace(action))
+	if action == "ACCEPT" {
+		return "ACCEPT"
+	}
+	return "DROP"
 }
 
 func boolPtrInt(value *bool) interface{} {
