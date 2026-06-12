@@ -53,7 +53,11 @@ Create container example:
   "ssh_auth_mode": "auto_password",
   "ssh_password": "",
   "ssh_public_key": "",
-  "expires_at": ""
+  "expires_at": "",
+  "network_down_mbps": 100,
+  "network_up_mbps": 50,
+  "io_read_mbps": 120,
+  "io_write_mbps": 80
 }
 ```
 
@@ -71,6 +75,12 @@ Field notes:
 | `ssh_auth_mode` | Linux creation supports `auto_password`, `password`, and `key`; reinstall also supports `keep`. |
 | `ssh_password` | Custom password for `password` mode. It must be 8-64 characters, include letters and digits, and contain no whitespace. |
 | `ssh_public_key` | One-line SSH public key for `key` mode. |
+| `network_down_mbps` | Optional container download/downlink bandwidth limit in Mbps. `0` means unlimited. |
+| `network_up_mbps` | Optional container upload/uplink bandwidth limit in Mbps. `0` means unlimited. |
+| `io_read_mbps` | Optional disk read limit in MB/s. `0` means unlimited. |
+| `io_write_mbps` | Optional disk write limit in MB/s. `0` means unlimited. |
+| `network_bw_mbps` | Legacy-compatible field. Sets symmetric downlink/uplink bandwidth; new integrations should prefer the split fields. |
+| `io_speed_mbps` | Legacy-compatible field. Sets symmetric read/write I/O limits; new integrations should prefer the split fields. |
 
 Reinstall example:
 
@@ -84,6 +94,102 @@ Reinstall example:
 ```
 
 `keep` is only for reinstall and keeps the current SSH password. Windows KVM images ignore Linux SSH public key fields.
+
+## Resource and Traffic Limits
+
+`PUT /api/v1/containers/{id}/resource-limit` supports partial updates. Fields omitted from the request remain unchanged.
+
+```json
+{
+  "vcpu": 2,
+  "ram_mb": 1024,
+  "network_down_mbps": 100,
+  "network_up_mbps": 50,
+  "io_read_mbps": 120,
+  "io_write_mbps": 80
+}
+```
+
+Legacy `network_bw_mbps` and `io_speed_mbps` are still accepted. They mean symmetric downlink/uplink bandwidth and symmetric read/write I/O limits. New integrations should use the split fields to control download/upload and read/write independently.
+
+`PUT /api/v1/containers/{id}/traffic-limit` request body:
+
+```json
+{
+  "traffic_mode": "total",
+  "monthly_traffic_gb": 1024,
+  "traffic_in_gb": 0,
+  "traffic_out_gb": 0
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `traffic_mode` | Traffic limit mode. Common values are `total` for a shared total limit and `split` for separate inbound/outbound limits. |
+| `monthly_traffic_gb` | Monthly total traffic quota for `total` mode, in GB. `0` means unlimited. |
+| `traffic_in_gb` | Monthly inbound quota for `split` mode, in GB. `0` means unlimited. |
+| `traffic_out_gb` | Monthly outbound quota for `split` mode, in GB. `0` means unlimited. |
+
+## Container Firewall
+
+Read container firewall settings with `GET /api/v1/containers/{id}/firewall` and update them with `PUT /api/v1/containers/{id}/firewall`. Updates are applied immediately when the container is running.
+
+Update example:
+
+```json
+{
+  "enabled": true,
+  "default_action": "DROP",
+  "rules": [
+    {
+      "direction": "in",
+      "protocol": "tcp",
+      "action": "ACCEPT",
+      "network": "ipv4",
+      "source_ip": "203.0.113.0/24",
+      "port": "22,80,443",
+      "description": "allow admin and web"
+    }
+  ]
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `enabled` | Whether the container firewall is enabled. |
+| `default_action` | Default action: `ACCEPT` or `DROP`. |
+| `rules[].id` | Optional. Omit for new rules and the backend will generate one. |
+| `rules[].direction` | Direction: `in` or `out`. |
+| `rules[].protocol` | Protocol: `tcp`, `udp`, `icmp`, or `all`. |
+| `rules[].action` | Action: `ACCEPT` or `DROP`. |
+| `rules[].network` | Network type: `ipv4`, `ipv6`, or `all`. |
+| `rules[].source_ip` | Optional source IP, CIDR, or address range. |
+| `rules[].port` | Optional. Supported only for `tcp`/`udp`; examples: `22`, `80,443`, or `8000-9000`. |
+| `rules[].description` | Optional note. |
+
+## API Key Create and Update
+
+`POST /api/v1/api-keys` and `PATCH /api/v1/api-keys/{id}` use the same field shape. `name` is required when creating a key; updates overwrite the fields you send.
+
+```json
+{
+  "name": "Automation",
+  "ip_whitelist": "198.51.100.23,203.0.113.0/24",
+  "scopes": ["dashboard:read", "container:read", "container:power"],
+  "expires_at": "2026-12-31 23:59:59",
+  "disabled": false,
+  "container_uuids": ["00000000-0000-4000-8000-000000000005"]
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `name` | API key name. Required when creating a key. |
+| `ip_whitelist` | Optional allowed source IPs/CIDRs, comma-separated. Empty means no IP restriction. |
+| `scopes` | Optional permission scopes. If omitted, the default read-only scopes are used. `*` grants all permissions. |
+| `expires_at` | Optional expiration time. Empty means no expiration. |
+| `disabled` | Whether this key is disabled. |
+| `container_uuids` | Optional container allowlist that limits the key to specific containers. |
 
 ## Python Example
 
@@ -140,6 +246,7 @@ print(resp.json())
 | --- | --- | --- |
 | GET | `/api/v1/dashboard` | Dashboard statistics |
 | GET | `/api/v1/host-info` | Host resources |
+| GET | `/api/v1/host-report` | Host inspection report |
 | GET | `/api/v1/routing` | NAT/IPv4/IPv6 routing |
 | PUT | `/api/v1/routing` | Update public IPv4/IPv6 pools |
 | POST | `/api/v1/routing/ipv4-scan` | Scan a public IPv4 segment |
@@ -151,10 +258,11 @@ print(resp.json())
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/v1/containers` | Container list |
+| GET | `/api/v1/containers` | Container list (recommended) |
+| GET | `/api/v1/containers/list` | Compatible GET form for container list |
 | POST | `/api/v1/containers/list` | Compatible POST form for container list |
 | POST | `/api/v1/containers` | Create container |
-| GET | `/api/v1/containers/{id|uuid|name}` | Container details |
+| GET | `/api/v1/containers/{id\|uuid\|name}` | Container details |
 | POST | `/api/v1/containers/{id}/start` | Start |
 | POST | `/api/v1/containers/{id}/stop` | Stop |
 | POST | `/api/v1/containers/{id}/restart` | Restart |
@@ -173,10 +281,12 @@ print(resp.json())
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/v1/containers/{id}/random-port` | Random available port |
+| GET | `/api/v1/containers/{id}/random-port` | Random available port; accepts `host_ip` to check a specific host IP |
 | POST | `/api/v1/containers/{id}/port-mappings` | Add port mapping |
 | PUT | `/api/v1/containers/{id}/port-mappings/{index}` | Update port mapping |
 | DELETE | `/api/v1/containers/{id}/port-mappings/{index}` | Delete port mapping |
+| GET | `/api/v1/containers/{id}/firewall` | Get container firewall settings |
+| PUT | `/api/v1/containers/{id}/firewall` | Update container firewall settings |
 | GET | `/api/v1/snapshots` | Snapshot overview |
 | GET | `/api/v1/containers/{id}/snapshots` | Container snapshots |
 | POST | `/api/v1/containers/{id}/snapshots` | Create snapshot |
@@ -191,6 +301,7 @@ print(resp.json())
 | --- | --- | --- |
 | GET | `/api/v1/templates` | Template list |
 | GET | `/api/v1/images` | Image management list |
+| GET | `/api/v1/images/enabled` | Enabled and downloaded images; supports `type=lxc\|kvm` |
 | POST | `/api/v1/images/download` | Download image |
 | POST | `/api/v1/images/cancel` | Cancel image download |
 | DELETE | `/api/v1/images/delete` | Delete image cache |
@@ -203,6 +314,12 @@ print(resp.json())
 | PUT | `/api/v1/security/settings` | Update security settings |
 | GET | `/api/v1/swap` | Swap information |
 | POST | `/api/v1/swap` | Adjust Swap |
+| GET | `/api/v1/language` | Current panel language |
+| POST/PUT | `/api/v1/language` | Update panel language |
+| GET | `/api/v1/ssl` | SSL settings (requires admin permission / `admin:access`) |
+| PUT | `/api/v1/ssl` | Update SSL settings (requires admin permission / `admin:access`) |
+| GET | `/api/v1/webssh-origins` | WebSSH Origin allowlist (requires admin permission / `admin:access`) |
+| PUT | `/api/v1/webssh-origins` | Update WebSSH Origin allowlist (requires admin permission / `admin:access`) |
 | POST | `/api/v1/batch-create` | Batch create containers |
 | POST | `/api/v1/batch-action` | Batch power action, delete, or reinstall |
 | POST | `/api/v1/ssh-ticket` | Create WebSSH ticket |
@@ -253,6 +370,16 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
         "public_ipv6_interface": "eth0"
       },
       "load": { "load1": 0.01, "load5": 0.03, "load15": 0.01 }
+    }
+  },
+  "GET /api/v1/host-report": {
+    "success": true,
+    "data": {
+      "generated_at": "2026-06-12 10:00:00",
+      "summary": { "status": "ok", "warnings": 0 },
+      "host": { "hostname": "node-1", "kernel": "6.8.0" },
+      "resources": { "cpu_cores": 8, "ram_total_mb": 31825, "disk_total_gb": 1750.49 },
+      "network": { "public_ipv4": "203.0.113.10", "public_ipv6": "2001:db8:100::2" }
     }
   },
   "GET /api/v1/routing": {
@@ -331,6 +458,10 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
         "vcpu": 1,
         "ram_mb": 512,
         "disk_gb": 10,
+        "network_down_mbps": 100,
+        "network_up_mbps": 50,
+        "io_read_mbps": 120,
+        "io_write_mbps": 80,
         "status": "running",
         "ip": "10.0.0.10",
         "ipv6": "2001:db8:100::1005",
@@ -341,6 +472,12 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
           { "container_port": 20000, "host_port": 20000, "protocol": "tcp", "description": "Port-20000" }
         ]
       }
+    ]
+  },
+  "GET /api/v1/containers/list": {
+    "success": true,
+    "data": [
+      { "id": 5, "uuid": "00000000-0000-4000-8000-000000000005", "name": "example-vm", "status": "running", "ip": "10.0.0.10" }
     ]
   },
   "POST /api/v1/containers/list": {
@@ -410,7 +547,7 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
     "success": true,
     "data": {
       "mode": "total",
-      "limit_gb": 0,
+      "limit_gb": 1024,
       "in_limit_gb": 0,
       "out_limit_gb": 0,
       "total_used_bytes": 142082,
@@ -453,7 +590,7 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
 
 ```json
 {
-  "GET /api/v1/containers/{id}/random-port": {
+  "GET /api/v1/containers/{id}/random-port?host_ip=203.0.113.10": {
     "success": true,
     "data": { "port": 61320 }
   },
@@ -473,6 +610,21 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
   "DELETE /api/v1/containers/{id}/port-mappings/{index}": {
     "success": true,
     "data": []
+  },
+  "GET /api/v1/containers/{id}/firewall": {
+    "success": true,
+    "data": {
+      "enabled": true,
+      "default_action": "DROP",
+      "rules": [
+        { "id": "a1b2c3d4", "direction": "in", "protocol": "tcp", "action": "ACCEPT", "network": "ipv4", "source_ip": "203.0.113.0/24", "port": "22,80,443", "description": "allow admin and web" }
+      ]
+    }
+  },
+  "PUT /api/v1/containers/{id}/firewall": {
+    "success": true,
+    "message": "Firewall updated",
+    "data": { "enabled": true, "default_action": "DROP", "rules": [] }
   },
   "GET /api/v1/snapshots": {
     "success": true,
@@ -539,6 +691,12 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
       { "id": "ubuntu-noble", "name": "Ubuntu 24.04", "type": "lxc", "downloaded": true, "enabled": true, "downloading": false, "progress": 0, "size_bytes": 135005452 }
     ]
   },
+  "GET /api/v1/images/enabled?type=lxc": {
+    "success": true,
+    "data": [
+      { "id": "ubuntu-noble", "name": "Ubuntu 24.04", "distro": "ubuntu", "release": "noble", "arch": "amd64", "variant": "default", "description": "Ubuntu 24.04 LTS", "type": "lxc" }
+    ]
+  },
   "POST /api/v1/images/download": {
     "success": true,
     "message": "Already downloaded"
@@ -585,8 +743,34 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
   },
   "POST /api/v1/swap": {
     "success": true,
-    "message": "SWAP 已调整为 16384 MB",
+    "message": "SWAP adjusted to 16384 MB",
     "data": { "total_mb": 16383, "used_mb": 0, "free_mb": 16383, "enabled": true, "swap_file": "/swapfile" }
+  },
+  "GET /api/v1/language": {
+    "success": true,
+    "data": { "language": "zh" }
+  },
+  "PUT /api/v1/language": {
+    "success": true,
+    "data": { "language": "en" }
+  },
+  "GET /api/v1/ssl": {
+    "success": true,
+    "data": { "enabled": true, "mode": "self-signed", "target": "panel.example.com", "detected_host": "panel.example.com", "needs_restart": false }
+  },
+  "PUT /api/v1/ssl": {
+    "success": true,
+    "message": "SSL settings saved",
+    "data": { "enabled": true, "mode": "self-signed", "target": "panel.example.com", "needs_restart": true }
+  },
+  "GET /api/v1/webssh-origins": {
+    "success": true,
+    "data": { "origins": ["https://panel.example.com"], "current_origin": "https://panel.example.com" }
+  },
+  "PUT /api/v1/webssh-origins": {
+    "success": true,
+    "message": "Origin allowlist saved",
+    "data": { "origins": ["https://panel.example.com"], "current_origin": "https://panel.example.com" }
   },
   "POST /api/v1/batch-create": {
     "success": true,
@@ -654,17 +838,17 @@ The samples below are grouped by endpoint path. Resource numbers, task IDs, cont
   "GET /api/v1/api-keys": {
     "success": true,
     "data": [
-      { "id": "c271023f", "name": "Test", "prefix": "clicd_sk_dd9d...", "ip_whitelist": "", "created_at": "2026-06-08 15:44:40", "last_used": "2026-06-08 15:46:10", "scopes": ["*"], "last_used_ip": "198.51.100.23" }
+      { "id": "c271023f", "name": "Test", "prefix": "clicd_sk_dd9d...", "ip_whitelist": "", "created_at": "2026-06-08 15:44:40", "last_used": "2026-06-08 15:46:10", "scopes": ["*"], "expires_at": "", "disabled": false, "container_uuids": [], "last_used_ip": "198.51.100.23" }
     ]
   },
   "POST /api/v1/api-keys": {
     "success": true,
     "message": "API key created. Save this key now - it won't be shown again.",
-    "data": { "id": "a1b2c3d4", "name": "Automation", "key": "clicd_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "prefix": "clicd_sk_xxxx...", "scopes": ["dashboard:read", "container:read"] }
+    "data": { "id": "a1b2c3d4", "name": "Automation", "key": "clicd_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "prefix": "clicd_sk_xxxx...", "ip_whitelist": "198.51.100.23", "scopes": ["dashboard:read", "container:read"], "expires_at": "2026-12-31 23:59:59", "disabled": false, "container_uuids": ["00000000-0000-4000-8000-000000000005"] }
   },
   "PATCH /api/v1/api-keys/{id}": {
     "success": true,
-    "data": { "id": "a1b2c3d4", "name": "Automation", "prefix": "clicd_sk_xxxx...", "scopes": ["dashboard:read", "container:read"], "disabled": false }
+    "data": { "id": "a1b2c3d4", "name": "Automation", "prefix": "clicd_sk_xxxx...", "scopes": ["dashboard:read", "container:read"], "expires_at": "2026-12-31 23:59:59", "disabled": false, "container_uuids": ["00000000-0000-4000-8000-000000000005"] }
   },
   "DELETE /api/v1/api-keys/{id}": {
     "success": true,
