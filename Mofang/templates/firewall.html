@@ -204,9 +204,12 @@
             return;
         }
         rulesContainer.innerHTML = currentRules.map(function(rule, idx) {
-            var dir = (rule.direction || 'in').toLowerCase();
-            var proto = (rule.protocol || 'tcp').toLowerCase();
-            var action = (rule.action || 'ACCEPT').toUpperCase();
+            var dirRaw = String(rule.direction || 'in').toLowerCase();
+            var protoRaw = String(rule.protocol || 'tcp').toLowerCase();
+            var actionRaw = String(rule.action || 'ACCEPT').toUpperCase();
+            var dir = (dirRaw === 'in' || dirRaw === 'out') ? dirRaw : 'in';
+            var proto = (protoRaw === 'tcp' || protoRaw === 'udp' || protoRaw === 'icmp' || protoRaw === 'all') ? protoRaw : 'tcp';
+            var action = (actionRaw === 'ACCEPT' || actionRaw === 'DROP' || actionRaw === 'REJECT') ? actionRaw : 'ACCEPT';
             var port = escapeHtml(portDisplay(rule.port));
             var srcIp = escapeHtml(sourceIpDisplay(rule.source_ip));
             var desc = escapeHtml(rule.description || '');
